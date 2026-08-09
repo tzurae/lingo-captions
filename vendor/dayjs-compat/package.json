@@ -1,0 +1,6 @@
+{
+  "name": "dayjs",
+  "version": "1.11.11-local-compat",
+  "main": "index.js",
+  "license": "MIT"
+}

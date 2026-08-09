@@ -1,0 +1,26 @@
+# Installed dependencies and local package cache
+node_modules/
+.pnpm-store/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Test and compiler output
+coverage/
+*.tsbuildinfo
+*.log
+outputs/
+
+# Temporary dependency extraction
+work/antd-package/
+work/*.tgz
+
+# Local implementation/review scratch data
+.superpowers/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube English Learning",
+  "version": "0.1.0",
+  "description": "Learn English while watching YouTube.",
+  "permissions": ["storage", "sidePanel"],
+  "host_permissions": ["https://api.openai.com/*"],
+  "background": {
+    "service_worker": "src/background/service-worker.ts",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "action": {
+    "default_title": "YouTube English Learning"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["src/content/page-bridge.ts"],
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["src/content/content-script.ts"]
+    }
+  ]
+}
