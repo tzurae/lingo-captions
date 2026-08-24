@@ -28,6 +28,23 @@ describe('visible caption fallback', () => {
     vi.useRealTimers();
   });
 
+  it('ignores caption segments hidden from the YouTube player', () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = `
+      <span class="ytp-caption-segment">Visible words</span>
+      <span class="ytp-caption-segment" hidden>Hidden stale words</span>`;
+    const onSnapshotChanged = vi.fn();
+    const fallback = createVisibleCaptionFallback({ document, getCurrentTimeMs: () => 1_000, onSnapshotChanged });
+
+    expect(fallback.captureNow()).toBe(true);
+    vi.advanceTimersByTime(350);
+    expect(onSnapshotChanged).toHaveBeenCalledWith({
+      cues: [{ id: 'visible-0', startMs: 1_000, endMs: 5_000, text: 'Visible words' }],
+      activeGroup: { cueIds: ['visible-0'], startMs: 1_000 },
+    });
+    vi.useRealTimers();
+  });
+
   it('captures a caption added after the observer starts', async () => {
     vi.useFakeTimers();
     const onSnapshotChanged = vi.fn();

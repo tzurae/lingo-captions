@@ -635,6 +635,54 @@ describe('App history actions', () => {
     expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-2');
   });
 
+  it('refines a timed Current Reading Segment with rendered progress without changing its identity', async () => {
+    render(<App />);
+    await waitFor(() => expect(registeredListeners).toHaveLength(1));
+    const listener = registeredListeners[0];
+
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First sentence.' },
+          { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Current sentence.' },
+          { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Future sentence.' },
+        ],
+      },
+    }));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 1_500 }));
+    await act(async () => listener({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+      progress: {
+        capturedAtMs: 1_500,
+        cues: [{ id: 'rendered-1', startMs: 1_400, endMs: 1_900, text: 'Current' }],
+        activeGroup: { cueIds: ['rendered-1'], startMs: 1_400 },
+      },
+    }));
+
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-2');
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('First sentence. Current Future sentence.');
+
+    await act(async () => listener({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+      progress: {
+        capturedAtMs: 1_500,
+        cues: [{ id: 'rendered-2', startMs: 1_500, endMs: 1_900, text: 'Unrelated' }],
+        activeGroup: { cueIds: ['rendered-2'], startMs: 1_500 },
+      },
+    }));
+    expect(screen.getByText('CAPTION_PROGRESS_ALIGNMENT_FAILED')).toBeInTheDocument();
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('First sentence. Current sentence. Future sentence.');
+  });
+
   it('selects the latest cue when fallback cue time ranges overlap', async () => {
     render(<App />);
     await waitFor(() => expect(registeredListeners).toHaveLength(1));
@@ -851,6 +899,78 @@ describe('App history actions', () => {
     expect(screen.getByText('Caption from B.')).toBeInTheDocument();
   });
 
+  it('isolates rendered progress across 20 same-tab video switches', async () => {
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    render(<App />);
+    await waitFor(() => expect(registeredListeners).toHaveLength(1));
+    const listener = registeredListeners[0];
+    const sender = { tab: { id: 42 } } as chrome.runtime.MessageSender;
+
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-0',
+      videoTitle: 'Video 0',
+      videoUrl: 'https://youtube.test/watch?v=video-0',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [{ id: 'cue-0', startMs: 0, endMs: 2_000, text: 'Video 0 complete.' }],
+      },
+    }, sender));
+
+    for (let index = 1; index <= 20; index += 1) {
+      const previousIndex = index - 1;
+      await act(async () => listener({
+        type: 'VIDEO_CHANGED',
+        videoId: `video-${index}`,
+        videoTitle: `Video ${index}`,
+        videoUrl: `https://youtube.test/watch?v=video-${index}`,
+      }, sender));
+      await act(async () => listener({
+        type: 'CAPTIONS_UPDATED',
+        videoId: `video-${index}`,
+        videoTitle: `Video ${index}`,
+        videoUrl: `https://youtube.test/watch?v=video-${index}`,
+        track: {
+          language: 'en',
+          isEnglish: true,
+          source: 'timedtext',
+          cues: [{ id: `cue-${index}`, startMs: 0, endMs: 2_000, text: `Video ${index} complete.` }],
+        },
+      }, sender));
+      await act(async () => listener({
+        type: 'PLAYBACK_UPDATED',
+        videoId: `video-${index}`,
+        currentTimeMs: 1_000,
+      }, sender));
+      await act(async () => listener({
+        type: 'CAPTION_PROGRESS_UPDATED',
+        videoId: `video-${index}`,
+        progress: {
+          capturedAtMs: 1_000,
+          cues: [{ id: `rendered-${index}`, startMs: 900, endMs: 1_500, text: `Video ${index}` }],
+          activeGroup: { cueIds: [`rendered-${index}`], startMs: 900 },
+        },
+      }, sender));
+      await act(async () => listener({
+        type: 'CAPTION_PROGRESS_UPDATED',
+        videoId: `video-${previousIndex}`,
+        progress: {
+          capturedAtMs: 1_000,
+          cues: [{ id: `stale-${previousIndex}`, startMs: 900, endMs: 1_500, text: 'Stale progress' }],
+          activeGroup: { cueIds: [`stale-${previousIndex}`], startMs: 900 },
+        },
+      }, sender));
+    }
+
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-20');
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('Video 20');
+    expect(screen.getByTestId('transcript-cues')).not.toHaveTextContent('Stale progress');
+  });
+
   it('ignores playback from a video other than the selected video', async () => {
     render(<App />);
     await waitFor(() => expect(registeredListeners).toHaveLength(1));
@@ -863,6 +983,36 @@ describe('App history actions', () => {
     await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-2', currentTimeMs: 500 }));
 
     expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
+  });
+
+  it('does not let rendered progress claim a video before its Caption Track arrives', async () => {
+    render(<App />);
+    await waitFor(() => expect(registeredListeners).toHaveLength(1));
+    const listener = registeredListeners[0];
+
+    await act(async () => listener({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'stale-video',
+      progress: {
+        capturedAtMs: 0,
+        cues: [{ id: 'stale-progress', startMs: 0, endMs: 1_000, text: 'Stale progress.' }],
+        activeGroup: { cueIds: ['stale-progress'], startMs: 0 },
+      },
+    }));
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First cue.' }],
+      },
+    }));
+
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('First cue.');
   });
 
   it('ignores stale caption, navigation, and no-caption state from another video', async () => {

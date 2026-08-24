@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import type { ActiveCaptionGroup, CaptionCue, CaptionDiagnostic, CaptionSource, CaptionTrack, ContentMessage, PublicSettings, QueryIntentId, QueryRequest, QueryResult as QueryResultValue } from '../domain/types';
+import type { ActiveCaptionGroup, CaptionCue, CaptionDiagnostic, CaptionTrack, ContentMessage, PublicSettings, QueryIntentId, QueryRequest, QueryResult as QueryResultValue, RenderedCaptionProgress } from '../domain/types';
 import { buildQueryContext } from '../domain/context-builder';
+import { projectLearningTranscriptExperience } from '../domain/learning-transcript-experience';
 import { defaultSettings } from '../storage/settings-store';
 import * as messageClient from './message-client';
 import { HistoryView } from './components/HistoryView';
@@ -49,10 +50,9 @@ function sanitizeActiveGroup(track: CaptionTrack): ActiveCaptionGroup | undefine
 export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const [ownerTabId] = useState(() => readOwnerTabId(window.location.search));
   const [tab, setTab] = useState<Tab>('transcript');
-  const [cues, setCues] = useState<CaptionCue[]>([]);
-  const [currentCueId, setCurrentCueId] = useState<string | null>(null);
-  const [captionSource, setCaptionSource] = useState<CaptionSource | null>(null);
-  const [activeGroup, setActiveGroup] = useState<ActiveCaptionGroup | undefined>();
+  const [captionTrack, setCaptionTrack] = useState<CaptionTrack | null>(null);
+  const [renderedProgress, setRenderedProgress] = useState<RenderedCaptionProgress | null>(null);
+  const [playbackMs, setPlaybackMs] = useState<number | null>(null);
   const [video, setVideo] = useState<Video>(null);
   const [selection, setSelection] = useState<TranscriptSelection | null>(null);
   const [result, setResult] = useState<QueryResultValue | null>(null);
@@ -68,14 +68,38 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const [settings, setSettings] = useState<PublicSettings>(publicDefaultSettings);
   const [activeQueryConfig, setActiveQueryConfig] = useState<ActiveQueryConfig | null>(null);
   const [settingsLoadState, setSettingsLoadState] = useState<SettingsLoadState>('loading');
-  const orderedCues = useMemo(() => [...cues].sort((left, right) => left.startMs - right.startMs), [cues]);
+  const transcriptExperience = useMemo(() => projectLearningTranscriptExperience({
+    track: captionTrack,
+    playbackMs,
+    renderedProgress,
+  }), [captionTrack, playbackMs, renderedProgress]);
+  const orderedCues = useMemo(
+    () => [...transcriptExperience.fullTranscript].sort((left, right) => left.startMs - right.startMs),
+    [transcriptExperience.fullTranscript],
+  );
+  const displayedDiagnostics = useMemo<CaptionDiagnostic[]>(() => {
+    if (!transcriptExperience.alignmentFailure) return diagnostics;
+    return [
+      ...diagnostics.filter((diagnostic) => diagnostic.stage !== 'visible-dom'),
+      {
+        stage: 'visible-dom',
+        status: 'fallback',
+        code: 'CAPTION_PROGRESS_ALIGNMENT_FAILED',
+        message: 'YouTube 畫面字幕無法對齊完整字幕，已改用完整目前句子。',
+        details: {
+          reason: transcriptExperience.alignmentFailure.reason,
+          currentText: transcriptExperience.alignmentFailure.currentText,
+          renderedText: transcriptExperience.alignmentFailure.renderedText,
+        },
+      },
+    ];
+  }, [diagnostics, transcriptExperience.alignmentFailure]);
+  const captionSource = captionTrack?.source ?? null;
+  const activeGroup = captionTrack?.activeGroup;
   const selectedVideoIdRef = useRef<string | null>(null);
   const activeTabIdRef = useRef<number | undefined>(undefined);
-  const captionSourceRef = useRef<CaptionSource | null>(null);
-  const cuesRef = useRef(orderedCues);
   const queryRequestTokenRef = useRef(0);
   const invalidatedContextReloadedRef = useRef(false);
-  cuesRef.current = orderedCues;
   const runtimeMessageListenerRef = useRef<(message: ContentMessage, sender?: chrome.runtime.MessageSender) => void>(() => undefined);
 
   function clearAssistant(): void {
@@ -149,7 +173,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         return;
       }
       if (selectedVideoIdRef.current === null) {
-        if (message.type === 'PLAYBACK_UPDATED') {
+        if (message.type === 'PLAYBACK_UPDATED' || message.type === 'CAPTION_PROGRESS_UPDATED') {
           return;
         }
         selectedVideoIdRef.current = message.videoId;
@@ -162,14 +186,18 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
       }
 
       if (message.type === 'CAPTIONS_UPDATED') {
-        captionSourceRef.current = message.track.source;
-        setCaptionSource(message.track.source);
-        setActiveGroup(sanitizeActiveGroup(message.track));
-        setCues(message.track.cues);
-        setCurrentCueId(null);
+        setCaptionTrack({
+          ...message.track,
+          cues: [...message.track.cues].sort((left, right) => left.startMs - right.startMs),
+          activeGroup: sanitizeActiveGroup(message.track),
+        });
+        setRenderedProgress(null);
         setVideo({ id: message.videoId, title: message.videoTitle, url: message.videoUrl });
         setError(null);
         setRefreshing(false);
+      }
+      if (message.type === 'CAPTION_PROGRESS_UPDATED') {
+        setRenderedProgress(message.progress);
       }
       if (message.type === 'CAPTION_DIAGNOSTIC') {
         setDiagnostics((current) => [...current.filter((entry) => entry.stage !== message.diagnostic.stage), message.diagnostic]);
@@ -178,27 +206,20 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         }
       }
       if (message.type === 'PLAYBACK_UPDATED') {
-        if (captionSourceRef.current === 'timedtext') {
-          const matchingCue = [...cuesRef.current].reverse().find((cue) => cue.startMs <= message.currentTimeMs && cue.endMs >= message.currentTimeMs);
-          setCurrentCueId(matchingCue?.id ?? null);
-        }
+        setPlaybackMs(message.currentTimeMs);
       }
       if (message.type === 'VIDEO_CHANGED') {
-        captionSourceRef.current = null;
-        setCaptionSource(null);
-        setActiveGroup(undefined);
+        setCaptionTrack(null);
+        setRenderedProgress(null);
+        setPlaybackMs(null);
         setVideo({ id: message.videoId, title: message.videoTitle, url: message.videoUrl });
-        setCues([]);
-        setCurrentCueId(null);
         clearAssistant();
         setDiagnostics([]);
       }
       if (message.type === 'NO_CAPTIONS') {
-        captionSourceRef.current = null;
-        setCaptionSource(null);
-        setActiveGroup(undefined);
-        setCues([]);
-        setCurrentCueId(null);
+        setCaptionTrack(null);
+        setRenderedProgress(null);
+        setPlaybackMs(null);
         clearAssistant();
         setError(message.reason === 'not-english'
           ? 'YouTube 有字幕，但沒有英文字幕軌。'
@@ -226,11 +247,9 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
       };
       const resetActiveTabState = () => {
         selectedVideoIdRef.current = null;
-        captionSourceRef.current = null;
-        setCaptionSource(null);
-        setActiveGroup(undefined);
-        setCues([]);
-        setCurrentCueId(null);
+        setCaptionTrack(null);
+        setRenderedProgress(null);
+        setPlaybackMs(null);
         setVideo(null);
         clearAssistant();
         setDiagnostics([]);
@@ -399,9 +418,6 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     }
   }
 
-  const currentCueIds = captionSource === 'visible-dom'
-    ? activeGroup?.cueIds ?? []
-    : currentCueId === null ? [] : [currentCueId];
   const style = { '--font-size': `${settings.fontSize}px`, '--text-color': settings.textColor, '--active-cue-color': settings.activeCueColor } as CSSProperties;
   return <main className="sidepanel-app" style={style}>
     <nav role="tablist" aria-label="Side panel tabs">
@@ -417,10 +433,12 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         </button>
         {refreshing && <p role="status">正在重新抓取字幕…</p>}
       </div>
-      <CaptionDiagnostics entries={diagnostics} />
+      <CaptionDiagnostics entries={displayedDiagnostics} />
       <TranscriptPanel
-        cues={orderedCues}
-        currentCueIds={currentCueIds}
+        cues={settings.autoFollowPlayback ? transcriptExperience.visibleCues : orderedCues}
+        sourceCues={orderedCues}
+        sourceCueIndexByVisibleId={transcriptExperience.sourceCueIndexByVisibleId}
+        currentCueIds={transcriptExperience.currentCueIds}
         autoFollowPlayback={settings.autoFollowPlayback}
         fontSize={settings.fontSize}
         textColor={settings.textColor}

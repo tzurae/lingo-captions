@@ -209,6 +209,69 @@ describe('content-script late-open state synchronization', () => {
     expect(timedTextMessage.track).toMatchObject({ source: 'timedtext' });
   });
 
+  it('publishes rendered caption progress separately from a complete Caption Track', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { configurable: true, value: 0.5 });
+    const segment = document.createElement('span');
+    segment.className = 'ytp-caption-segment';
+    segment.textContent = 'Hello';
+    document.body.append(video, segment);
+
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+      progress: {
+        capturedAtMs: 500,
+        cues: [expect.objectContaining({ id: 'progress-0', text: 'Hello' })],
+        activeGroup: { cueIds: ['progress-0'], startMs: 500 },
+      },
+    }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTIONS_UPDATED',
+      track: expect.objectContaining({ source: 'timedtext' }),
+    }));
+
+    sendMessage.mockClear();
+    onMessage?.({ type: 'REQUEST_STATE' });
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+    })));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+    }));
+  });
+
+  it('disconnects rendered progress monitoring when the progress message is rejected synchronously', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { configurable: true, value: 0.5 });
+    const segment = document.createElement('span');
+    segment.className = 'ytp-caption-segment';
+    segment.textContent = 'Hello';
+    document.body.append(video, segment);
+    const disconnectSpy = vi.spyOn(MutationObserver.prototype, 'disconnect');
+
+    const { sendMessage } = await loadContentScriptRuntime({
+      captionResponse: playerResponse,
+      sendMessageImpl: (message) => {
+        if (message.type === 'CAPTION_PROGRESS_UPDATED') throw new Error('No receiver');
+      },
+    });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+    })));
+    expect(disconnectSpy).toHaveBeenCalled();
+  });
+
   it.each(['top-level video', 'nested video', 'request version'] as const)(
     'ignores a bridge response with mismatched %s',
     async (boundary) => {
