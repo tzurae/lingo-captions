@@ -1,5 +1,6 @@
 import type { ActiveCaptionGroup, CaptionCue } from '../domain/types';
 import { splitCaptionText, type CaptionSentence } from './caption-sentences';
+import { readRenderedCaptionText } from './rendered-caption-text';
 
 export type VisibleCaptionSnapshot = {
   cues: CaptionCue[];
@@ -26,15 +27,6 @@ type CueGroup = {
   complete: boolean;
   cues: CaptionCue[];
 };
-
-function readVisibleCaptionText(pageDocument: Document): string {
-  return Array.from(pageDocument.querySelectorAll('.ytp-caption-segment'))
-    .map((element) => element.textContent?.replace(/\s+/g, ' ').trim() ?? '')
-    .filter(Boolean)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
 
 function comparableText(text: string): string {
   return text.toLocaleLowerCase()
@@ -210,7 +202,7 @@ export function createVisibleCaptionFallback(options: VisibleCaptionFallbackOpti
   }
 
   function captureNow(): boolean {
-    const text = readVisibleCaptionText(options.document);
+    const text = readRenderedCaptionText(options.document);
     if (!text) {
       if (!lastSnapshot && !activeBlock) return false;
       lastSnapshot = '';
@@ -247,9 +239,9 @@ export function createVisibleCaptionFallback(options: VisibleCaptionFallbackOpti
   return {
     start() {
       if (observer) return;
-      captureNow();
       observer = new MutationObserver(() => captureNow());
       observer.observe(options.document.body, { childList: true, characterData: true, subtree: true });
+      captureNow();
     },
     stop() {
       observer?.disconnect();

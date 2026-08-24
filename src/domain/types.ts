@@ -20,6 +20,12 @@ export type CaptionTrack = {
   activeGroup?: ActiveCaptionGroup;
 };
 
+export type RenderedCaptionProgress = {
+  capturedAtMs: number;
+  cues: CaptionCue[];
+  activeGroup?: ActiveCaptionGroup;
+};
+
 export type CaptionDiagnosticStage =
   | 'player-response'
   | 'caption-tracks'
@@ -39,6 +45,7 @@ export type CaptionDiagnostic = {
 
 export type ContentMessage =
   | { type: 'CAPTIONS_UPDATED'; videoId: string; videoTitle: string; videoUrl: string; track: CaptionTrack }
+  | { type: 'CAPTION_PROGRESS_UPDATED'; videoId: string; progress: RenderedCaptionProgress }
   | { type: 'PLAYBACK_UPDATED'; videoId: string; currentTimeMs: number }
   | { type: 'VIDEO_CHANGED'; videoId: string; videoTitle: string; videoUrl: string }
   | { type: 'NO_CAPTIONS'; videoId: string; reason: 'not-found' | 'not-english' | 'unsupported' }

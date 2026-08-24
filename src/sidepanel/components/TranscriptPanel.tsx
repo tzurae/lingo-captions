@@ -5,6 +5,8 @@ export type TranscriptSelection = { selectedText: string; cueIndex: number; sent
 
 type Props = {
   cues: CaptionCue[];
+  sourceCues?: CaptionCue[];
+  sourceCueIndexByVisibleId?: Record<string, number>;
   currentCueIds: string[];
   autoFollowPlayback: boolean;
   fontSize?: number;
@@ -15,13 +17,28 @@ type Props = {
 
 type CueEntry = {
   cue: CaptionCue;
-  originalIndex: number;
+  visibleIndex: number;
+  sourceCueIndex: number;
   region: 'past' | 'current' | 'future';
   state: 'past' | 'current' | 'future';
 };
 
-export function TranscriptPanel({ cues, currentCueIds, autoFollowPlayback, fontSize, textColor, onSelection, onReplay }: Props) {
+export function TranscriptPanel({
+  cues,
+  sourceCues = cues,
+  sourceCueIndexByVisibleId,
+  currentCueIds,
+  autoFollowPlayback,
+  fontSize,
+  textColor,
+  onSelection,
+  onReplay,
+}: Props) {
   const orderedCues = useMemo(() => [...cues].sort((a, b) => a.startMs - b.startMs), [cues]);
+  const orderedSourceCues = useMemo(
+    () => [...sourceCues].sort((a, b) => a.startMs - b.startMs),
+    [sourceCues],
+  );
   const currentIdSet = new Set(currentCueIds);
   const currentIndices = orderedCues.flatMap((cue, index) => currentIdSet.has(cue.id) ? [index] : []);
   const activeFirst = currentIndices.at(0) ?? -1;
@@ -51,57 +68,61 @@ export function TranscriptPanel({ cues, currentCueIds, autoFollowPlayback, fontS
     : -1;
   const focusFirst = activeFirst >= 0 ? activeFirst : rememberedFirst;
   const focusLast = activeLast >= 0 ? activeLast : rememberedLast;
-  const allEntries: CueEntry[] = orderedCues.map((cue, originalIndex) => {
-    const region = focusFirst < 0 || originalIndex > focusLast
+  const allEntries: CueEntry[] = orderedCues.map((cue, visibleIndex) => {
+    const region = focusFirst < 0 || visibleIndex > focusLast
       ? 'future'
-      : originalIndex < focusFirst ? 'past' : 'current';
+      : visibleIndex < focusFirst ? 'past' : 'current';
     const state = currentIdSet.has(cue.id)
       ? 'current'
-      : activeFirst < 0 && originalIndex >= focusFirst && originalIndex <= focusLast
+      : activeFirst < 0 && visibleIndex >= focusFirst && visibleIndex <= focusLast
         ? 'current'
-        : focusFirst >= 0 && originalIndex <= focusLast ? 'past' : 'future';
-    return { cue, originalIndex, region, state };
+        : focusFirst >= 0 && visibleIndex <= focusLast ? 'past' : 'future';
+    return {
+      cue,
+      visibleIndex,
+      sourceCueIndex: sourceCueIndexByVisibleId?.[cue.id] ?? visibleIndex,
+      region,
+      state,
+    };
   });
-  const visibleEntries = autoFollowPlayback
-    ? focusFirst < 0
-      ? allEntries.slice(0, 5)
-      : allEntries.slice(
-        Math.max(0, focusFirst - 2),
-        Math.min(allEntries.length, focusLast + 3),
-      )
-    : allEntries;
+  const visibleEntries = allEntries;
 
   function reportSelection(event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement> | React.PointerEvent<HTMLElement>): boolean {
     const browserSelection = window.getSelection();
     const text = browserSelection?.toString().trim() ?? '';
     const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-cue-index]') : null;
     if (!text || !target) return false;
-    const cueIndex = Number(target.dataset.cueIndex);
-    const cue = orderedCues[cueIndex];
-    if (!cue) return false;
+    const sourceCueIndex = Number(target.dataset.cueIndex);
+    const sourceCue = orderedSourceCues[sourceCueIndex];
+    if (!sourceCue) return false;
     const rect = browserSelection && browserSelection.rangeCount > 0
       ? browserSelection.getRangeAt(0).getBoundingClientRect()
       : target.getBoundingClientRect();
-    onSelection({ selectedText: text, cueIndex, sentence: cue.text, anchor: { x: rect.left + rect.width / 2, y: rect.bottom } });
+    onSelection({
+      selectedText: text,
+      cueIndex: sourceCueIndex,
+      sentence: sourceCue.text,
+      anchor: { x: rect.left + rect.width / 2, y: rect.bottom },
+    });
     return true;
   }
 
   function replayCue(event: React.PointerEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) {
     if (reportSelection(event)) return;
     const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-cue-index]') : null;
-    const cueIndex = target ? Number(target.dataset.cueIndex) : Number.NaN;
-    const cue = orderedCues[cueIndex];
-    if (cue) onReplay(cue);
+    const sourceCueIndex = target ? Number(target.dataset.cueIndex) : Number.NaN;
+    const sourceCue = orderedSourceCues[sourceCueIndex];
+    if (sourceCue) onReplay(sourceCue);
   }
 
   if (orderedCues.length === 0) {
     return <p role="status">No English captions are available.</p>;
   }
 
-  const renderCue = ({ cue, originalIndex, state }: CueEntry) => (
+  const renderCue = ({ cue, sourceCueIndex, state }: CueEntry) => (
     <p
       key={cue.id}
-      data-cue-index={originalIndex}
+      data-cue-index={sourceCueIndex}
       data-cue-state={autoFollowPlayback ? state : undefined}
       aria-current={currentIdSet.has(cue.id) ? 'true' : undefined}
       className="caption-cue"

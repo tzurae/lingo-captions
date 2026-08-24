@@ -1,6 +1,7 @@
 import type { CaptionDiagnostic, ContentMessage, SidePanelContentMessage } from '../domain/types';
 import { parseCaptionTrack, type RawCaptionCue, type RawCaptionTrack } from './youtube-captions';
 import { createVisibleCaptionFallback, type VisibleCaptionFallback } from './visible-caption-fallback';
+import { createRenderedCaptionProgressMonitor, type RenderedCaptionProgressMonitor } from './rendered-caption-progress-monitor';
 
 type PlayerResponse = {
   videoDetails?: { videoId?: string };
@@ -33,22 +34,23 @@ type CaptionResult =
   | { type: 'track'; track: RawCaptionTrack }
   | { type: 'no-captions'; reason: 'not-found' | 'not-english' | 'unsupported'; diagnostic: CaptionDiagnostic };
 
-type SynchronizableMessage = Extract<ContentMessage, { type: 'VIDEO_CHANGED' | 'CAPTIONS_UPDATED' | 'NO_CAPTIONS' | 'CAPTION_DIAGNOSTIC' }>;
+type SynchronizableMessage = Extract<ContentMessage, { type: 'VIDEO_CHANGED' | 'CAPTIONS_UPDATED' | 'CAPTION_PROGRESS_UPDATED' | 'NO_CAPTIONS' | 'CAPTION_DIAGNOSTIC' }>;
 
 const playbackIntervalMs = 250;
 let lastPlaybackMessageAt = Number.NEGATIVE_INFINITY;
 let activeVideo: HTMLVideoElement | null = null;
 let currentState: SynchronizableMessage[] = [];
 let visibleCaptionFallback: VisibleCaptionFallback | null = null;
+let renderedCaptionProgressMonitor: RenderedCaptionProgressMonitor | null = null;
 let synchronizationVersion = 0;
 
 function sendMessage(message: ContentMessage): void {
-  const fallbackAtSend = visibleCaptionFallback;
+  const monitorAtSend = renderedCaptionProgressMonitor ?? visibleCaptionFallback;
   try {
     const pending = chrome.runtime.sendMessage(message);
-    void pending?.catch?.(() => fallbackAtSend?.stop());
+    void pending?.catch?.(() => monitorAtSend?.stop());
   } catch {
-    fallbackAtSend?.stop();
+    monitorAtSend?.stop();
   }
 }
 
@@ -376,6 +378,8 @@ function startVisibleCaptionFallback(
   version: number,
 ): boolean {
   visibleCaptionFallback?.stop();
+  renderedCaptionProgressMonitor?.stop();
+  renderedCaptionProgressMonitor = null;
   const fallbackDiagnostic = diagnosticMessage(videoId, {
     stage: 'visible-dom',
     status: 'fallback',
@@ -425,6 +429,30 @@ function startVisibleCaptionFallback(
   return captured;
 }
 
+function startRenderedCaptionProgressMonitor(videoId: string, version: number): void {
+  visibleCaptionFallback?.stop();
+  visibleCaptionFallback = null;
+  renderedCaptionProgressMonitor?.stop();
+  renderedCaptionProgressMonitor = createRenderedCaptionProgressMonitor({
+    document,
+    getCurrentTimeMs: () => Math.round((document.querySelector('video')?.currentTime ?? 0) * 1000),
+    onProgressChanged: (progress) => {
+      if (version !== synchronizationVersion || getVideoId() !== videoId) return;
+      const progressMessage: SynchronizableMessage = {
+        type: 'CAPTION_PROGRESS_UPDATED',
+        videoId,
+        progress,
+      };
+      currentState = [
+        ...currentState.filter((message) => message.type !== 'CAPTION_PROGRESS_UPDATED'),
+        progressMessage,
+      ];
+      broadcastState(progressMessage);
+    },
+  });
+  renderedCaptionProgressMonitor.start();
+}
+
 async function synchronizeVideo(
   sendPlaybackAfter = false,
   requestPlayerResponseFirst = false,
@@ -437,6 +465,8 @@ async function synchronizeVideo(
   const version = ++synchronizationVersion;
   visibleCaptionFallback?.stop();
   visibleCaptionFallback = null;
+  renderedCaptionProgressMonitor?.stop();
+  renderedCaptionProgressMonitor = null;
 
   lastPlaybackMessageAt = Number.NEGATIVE_INFINITY;
   const video = document.querySelector('video');
@@ -505,6 +535,7 @@ async function synchronizeVideo(
     currentState = [videoChangedMessage, readyDiagnostic, captionsUpdatedMessage];
     broadcastState(readyDiagnostic);
     broadcastState(captionsUpdatedMessage);
+    startRenderedCaptionProgressMonitor(videoId, version);
     if (sendPlaybackAfter) {
       sendCurrentPlayback();
     }
