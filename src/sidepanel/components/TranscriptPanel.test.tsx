@@ -17,6 +17,10 @@ const focusCues = [
   { id: 'cue-7', startMs: 6_000, endMs: 7_000, text: 'Cue seven' },
 ];
 
+const focusSourceIndexById = Object.fromEntries(
+  focusCues.map((cue, index) => [cue.id, index]),
+);
+
 describe('TranscriptPanel', () => {
   it('applies the configured subtitle font size and text color to the transcript', () => {
     render(<TranscriptPanel
@@ -72,6 +76,44 @@ describe('TranscriptPanel', () => {
     expect(onReplay).not.toHaveBeenCalled();
   });
 
+  it('uses full source context for a differently segmented rendered cue', () => {
+    const onSelection = vi.fn();
+    const onReplay = vi.fn();
+    const sourceCue = { id: 'source', startMs: 1_000, endMs: 2_000, text: 'I think we should start.' };
+    const renderedCue = { id: 'rendered', startMs: 1_200, endMs: 1_500, text: 'I think we should' };
+    render(<TranscriptPanel
+      cues={[renderedCue]}
+      sourceCues={[sourceCue]}
+      sourceCueIndexByVisibleId={{ rendered: 0 }}
+      currentCueIds={['rendered']}
+      autoFollowPlayback
+      onSelection={onSelection}
+      onReplay={onReplay}
+    />);
+
+    const cue = screen.getByText('I think we should');
+    const range = document.createRange();
+    range.selectNodeContents(cue);
+    Object.defineProperty(range, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20, width: 80, bottom: 110 } as DOMRect),
+    });
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    fireEvent.pointerUp(cue);
+
+    expect(onSelection).toHaveBeenCalledWith({
+      selectedText: 'I think we should',
+      cueIndex: 0,
+      sentence: 'I think we should start.',
+      anchor: { x: 60, y: 110 },
+    });
+    selection?.removeAllRanges();
+    fireEvent.pointerUp(cue);
+    expect(onReplay).toHaveBeenCalledWith(sourceCue);
+  });
+
   it('replays a cue when it receives a pointer interaction without selected text', () => {
     const onReplay = vi.fn();
     render(<TranscriptPanel cues={cues} currentCueIds={[]} autoFollowPlayback={false} onSelection={vi.fn()} onReplay={onReplay} />);
@@ -96,53 +138,92 @@ describe('TranscriptPanel', () => {
     expect(screen.getByText('No English captions are available.')).toBeInTheDocument();
   });
 
-  it('shows two past cues, the current cue, and two future cues in focus mode', () => {
-    render(<TranscriptPanel cues={focusCues} currentCueIds={['cue-4']} autoFollowPlayback onSelection={vi.fn()} onReplay={vi.fn()} />);
+  it('renders the supplied current neighborhood without reslicing it', () => {
+    render(<TranscriptPanel
+      cues={focusCues.slice(2, 5)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-4']}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
     expect(screen.getByRole('region', { name: 'Transcript' })).toHaveClass('transcript-focus-window');
-    expect(screen.queryByText('Cue one')).not.toBeInTheDocument();
-    expect(screen.getByText('Cue two')).toHaveAttribute('data-cue-state', 'past');
     expect(screen.getByText('Cue three')).toHaveAttribute('data-cue-state', 'past');
     expect(screen.getByText('Cue four')).toHaveAttribute('data-cue-state', 'current');
     expect(screen.getByText('Cue four')).toHaveAttribute('aria-current', 'true');
     expect(screen.getByText('Cue five')).toHaveAttribute('data-cue-state', 'future');
-    expect(screen.getByText('Cue six')).toHaveAttribute('data-cue-state', 'future');
-    expect(screen.queryByText('Cue seven')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^Cue /)).toHaveLength(3);
   });
 
-  it('keeps focus windows inside transcript boundaries', () => {
-    const { rerender } = render(<TranscriptPanel cues={focusCues} currentCueIds={['cue-1']} autoFollowPlayback onSelection={vi.fn()} onReplay={vi.fn()} />);
+  it('renders supplied neighborhoods at transcript boundaries', () => {
+    const { rerender } = render(<TranscriptPanel
+      cues={focusCues.slice(0, 2)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-1']}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
     expect(screen.getByText('Cue one')).toHaveAttribute('data-cue-state', 'current');
     expect(screen.getByText('Cue two')).toHaveAttribute('data-cue-state', 'future');
-    expect(screen.getByText('Cue three')).toHaveAttribute('data-cue-state', 'future');
-    expect(screen.queryByText('Cue four')).not.toBeInTheDocument();
+    expect(screen.queryByText('Cue three')).not.toBeInTheDocument();
 
-    rerender(<TranscriptPanel cues={focusCues} currentCueIds={['cue-7']} autoFollowPlayback onSelection={vi.fn()} onReplay={vi.fn()} />);
+    rerender(<TranscriptPanel
+      cues={focusCues.slice(5)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-7']}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
-    expect(screen.queryByText('Cue four')).not.toBeInTheDocument();
-    expect(screen.getByText('Cue five')).toHaveAttribute('data-cue-state', 'past');
+    expect(screen.queryByText('Cue five')).not.toBeInTheDocument();
     expect(screen.getByText('Cue six')).toHaveAttribute('data-cue-state', 'past');
     expect(screen.getByText('Cue seven')).toHaveAttribute('data-cue-state', 'current');
   });
 
-  it('keeps the last focus window during a caption gap without marking a cue active', () => {
-    const { rerender } = render(<TranscriptPanel cues={focusCues} currentCueIds={['cue-4']} autoFollowPlayback onSelection={vi.fn()} onReplay={vi.fn()} />);
+  it('keeps the supplied neighborhood during a caption gap without marking a cue active', () => {
+    const neighborhood = focusCues.slice(2, 5);
+    const { rerender } = render(<TranscriptPanel
+      cues={neighborhood}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-4']}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
-    rerender(<TranscriptPanel cues={focusCues} currentCueIds={[]} autoFollowPlayback onSelection={vi.fn()} onReplay={vi.fn()} />);
+    rerender(<TranscriptPanel
+      cues={neighborhood}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={[]}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
-    expect(screen.queryByText('Cue one')).not.toBeInTheDocument();
     expect(screen.getByText('Cue four')).toHaveAttribute('data-cue-state', 'current');
     expect(screen.getByText('Cue four')).not.toHaveAttribute('aria-current');
-    expect(screen.queryByText('Cue seven')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^Cue /)).toHaveLength(3);
   });
 
-  it('shows the first five cues before the first playback position is received', () => {
-    render(<TranscriptPanel cues={focusCues} currentCueIds={[]} autoFollowPlayback onSelection={vi.fn()} onReplay={vi.fn()} />);
+  it('renders the supplied initial neighborhood before the first playback position', () => {
+    render(<TranscriptPanel
+      cues={focusCues.slice(0, 3)}
+      currentCueIds={[]}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
-    expect(screen.getByText('Cue one')).toBeInTheDocument();
-    expect(screen.getByText('Cue five')).toBeInTheDocument();
-    expect(screen.queryByText('Cue six')).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^Cue /)).toHaveLength(3);
     expect(screen.getByRole('region', { name: 'Transcript' }).querySelector('[aria-current="true"]')).toBeNull();
   });
 
@@ -155,12 +236,18 @@ describe('TranscriptPanel', () => {
     expect(screen.getByRole('region', { name: 'Transcript' })).not.toHaveClass('transcript-focus-window');
   });
 
-  it('reports the full transcript index when selecting a cue inside the focus window', () => {
+  it('reports the full transcript index from a supplied neighborhood', () => {
     const onSelection = vi.fn();
-    render(<TranscriptPanel cues={focusCues} currentCueIds={['cue-4']} autoFollowPlayback onSelection={onSelection} onReplay={vi.fn()} />);
-    expect(screen.queryByText('Cue one')).not.toBeInTheDocument();
-
-    const cue = screen.getByText('Cue two');
+    render(<TranscriptPanel
+      cues={focusCues.slice(2, 5)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-4']}
+      autoFollowPlayback
+      onSelection={onSelection}
+      onReplay={vi.fn()}
+    />);
+    const cue = screen.getByText('Cue three');
     const range = document.createRange();
     range.selectNodeContents(cue);
     Object.defineProperty(range, 'getBoundingClientRect', {
@@ -173,16 +260,24 @@ describe('TranscriptPanel', () => {
     fireEvent.pointerUp(cue);
 
     expect(onSelection).toHaveBeenCalledWith({
-      selectedText: 'Cue two',
-      cueIndex: 1,
-      sentence: 'Cue two',
+      selectedText: 'Cue three',
+      cueIndex: 2,
+      sentence: 'Cue three',
       anchor: { x: 60, y: 110 },
     });
   });
 
   it('reports a pointer text selection only once when the browser also emits mouseup', () => {
     const onSelection = vi.fn();
-    render(<TranscriptPanel cues={focusCues} currentCueIds={['cue-4']} autoFollowPlayback onSelection={onSelection} onReplay={vi.fn()} />);
+    render(<TranscriptPanel
+      cues={focusCues.slice(2, 5)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-4']}
+      autoFollowPlayback
+      onSelection={onSelection}
+      onReplay={vi.fn()}
+    />);
     const cue = screen.getByText('Cue four');
     const range = document.createRange();
     range.selectNodeContents(cue);
@@ -200,48 +295,48 @@ describe('TranscriptPanel', () => {
     expect(onSelection).toHaveBeenCalledTimes(1);
   });
 
-  it('centers and marks every cue in the current group', () => {
-    render(
-      <TranscriptPanel
-        cues={focusCues}
-        currentCueIds={['cue-3', 'cue-4', 'cue-5']}
-        autoFollowPlayback
-        onSelection={vi.fn()}
-        onReplay={vi.fn()}
-      />,
-    );
+  it('marks every cue in the supplied current group', () => {
+    render(<TranscriptPanel
+      cues={focusCues.slice(1, 6)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
+      currentCueIds={['cue-3', 'cue-4', 'cue-5']}
+      autoFollowPlayback
+      onSelection={vi.fn()}
+      onReplay={vi.fn()}
+    />);
 
-    expect(screen.getByText('Cue three')).toHaveAttribute('aria-current', 'true');
-    expect(screen.getByText('Cue four')).toHaveAttribute('aria-current', 'true');
-    expect(screen.getByText('Cue five')).toHaveAttribute('aria-current', 'true');
     expect(screen.getByRole('region', { name: 'Transcript' })
       .querySelectorAll('[aria-current="true"]')).toHaveLength(3);
-    expect(screen.getByText('Cue one')).toBeInTheDocument();
+    expect(screen.queryByText('Cue one')).not.toBeInTheDocument();
     expect(screen.getByText('Cue two')).toBeInTheDocument();
     expect(screen.getByText('Cue six')).toBeInTheDocument();
-    expect(screen.getByText('Cue seven')).toBeInTheDocument();
+    expect(screen.queryByText('Cue seven')).not.toBeInTheDocument();
   });
 
   it('does not fabricate future rows after a group at the transcript end', () => {
     render(<TranscriptPanel
-      cues={focusCues}
+      cues={focusCues.slice(4)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
       currentCueIds={['cue-6', 'cue-7']}
       autoFollowPlayback
       onSelection={vi.fn()}
       onReplay={vi.fn()}
     />);
 
-    expect(screen.getAllByText(/^Cue /)).toHaveLength(4);
-    expect(screen.getByText('Cue four')).toBeInTheDocument();
-    expect(screen.getByText('Cue five')).toBeInTheDocument();
+    expect(screen.getAllByText(/^Cue /)).toHaveLength(3);
+    expect(screen.getByText('Cue five')).toHaveAttribute('data-cue-state', 'past');
     expect(screen.getByText('Cue six')).toHaveAttribute('aria-current', 'true');
     expect(screen.getByText('Cue seven')).toHaveAttribute('aria-current', 'true');
   });
 
-  it('reports the full transcript index from a multi-row focus slice', () => {
+  it('reports the full transcript index from a multi-row current group', () => {
     const onSelection = vi.fn();
     render(<TranscriptPanel
-      cues={focusCues}
+      cues={focusCues.slice(1, 6)}
+      sourceCues={focusCues}
+      sourceCueIndexByVisibleId={focusSourceIndexById}
       currentCueIds={['cue-3', 'cue-4', 'cue-5']}
       autoFollowPlayback
       onSelection={onSelection}
