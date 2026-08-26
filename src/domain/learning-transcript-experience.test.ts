@@ -174,11 +174,11 @@ describe('Learning Transcript Experience', () => {
       },
     });
 
-    expect(experience.fullTranscript.map((cue) => cue.text)).toEqual(['I think', 'we should start']);
-    expect(experience.visibleCues.map((cue) => cue.text)).toEqual(['I think', 'we should']);
+    expect(experience.fullTranscript).toEqual(track.cues);
+    expect(experience.visibleCues.map((cue) => cue.text)).toEqual(['I think we should']);
     expect(experience.currentSourceCueIds).toEqual(['source-1', 'source-2']);
-    expect(experience.currentCueIds).toEqual(['source-1', 'source-2']);
-    expect(experience.sourceCueIndexByVisibleId).toEqual({ 'source-1': 0, 'source-2': 1 });
+    expect(experience.currentCueIds).toEqual(['current:source-1|source-2']);
+    expect(experience.sourceCueIndexByVisibleId).toEqual({ 'current:source-1|source-2': 0 });
   });
 
   it('rejects repeated rendered text captured outside the current Source Cue interval', () => {
@@ -237,5 +237,33 @@ describe('Learning Transcript Experience', () => {
 
     expect(experience.currentCueIds).toEqual([]);
     expect(experience.visibleCues.map((cue) => cue.id)).toEqual(['gap-1', 'gap-2', 'gap-3']);
+  });
+
+  it('uses immediate rendered progress as current while a visible-DOM transcript catches up', () => {
+    const track: CaptionTrack = {
+      language: 'en-visible',
+      isEnglish: true,
+      source: 'visible-dom',
+      cues: [{ id: 'visible-delayed', startMs: 29_000, endMs: 33_000, text: 'I' }],
+      activeGroup: { cueIds: ['visible-delayed'], startMs: 29_000 },
+    };
+    const experience = projectLearningTranscriptExperience({
+      track,
+      playbackMs: 29_200,
+      renderedProgress: {
+        capturedAtMs: 29_200,
+        cues: [{
+          id: 'progress-0',
+          startMs: 29_000,
+          endMs: 29_201,
+          text: 'National League guy,.....Almost',
+        }],
+        activeGroup: { cueIds: ['progress-0'], startMs: 29_000 },
+      },
+    });
+
+    expect(experience.fullTranscript).toEqual(track.cues);
+    expect(experience.currentCueIds).toEqual(['progress-0']);
+    expect(experience.visibleCues.map((cue) => cue.text)).toEqual(['National League guy,.....Almost']);
   });
 });

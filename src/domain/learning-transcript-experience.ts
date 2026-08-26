@@ -83,33 +83,62 @@ function baseExperience(
   };
 }
 
-function alignRenderedProgress(
+function canAlignRenderedProgress(
   currentSourceCues: CaptionCue[],
   renderedCues: CaptionCue[],
-): Map<string, string> | null {
-  const sourceTokensByCue = currentSourceCues.map((cue) => captionTokens(cue.text));
-  const sourceTokens = sourceTokensByCue.flatMap((tokens) => tokens.map((token) => token.normalized));
-  const renderedTokens = captionTokens(renderedCues.map((cue) => cue.text).join(' '));
-  const renderedStart = findTokenSequence(sourceTokens, renderedTokens.map((token) => token.normalized));
-  if (renderedStart < 0) return null;
-  const renderedEnd = renderedStart + renderedTokens.length;
+): boolean {
+  const sourceTokens = currentSourceCues
+    .flatMap((cue) => captionTokens(cue.text))
+    .map((token) => token.normalized);
+  const renderedTokens = captionTokens(renderedCues.map((cue) => cue.text).join(' '))
+    .map((token) => token.normalized);
+  return findTokenSequence(sourceTokens, renderedTokens) >= 0;
+}
 
-  const refinements = new Map<string, string>();
-  let sourceStart = 0;
-  for (const [index, cue] of currentSourceCues.entries()) {
-    const sourceEnd = sourceStart + sourceTokensByCue[index].length;
-    const overlapStart = Math.max(sourceStart, renderedStart);
-    const overlapEnd = Math.min(sourceEnd, renderedEnd);
-    if (overlapStart >= overlapEnd) return null;
-    const renderedOffset = overlapStart - renderedStart;
-    const text = renderedTokens
-      .slice(renderedOffset, renderedOffset + overlapEnd - overlapStart)
-      .map((token) => token.raw)
-      .join(' ');
-    refinements.set(cue.id, text);
-    sourceStart = sourceEnd;
+function projectVisibleDomExperience(
+  track: CaptionTrack,
+  playbackMs: number | null,
+  renderedProgress: RenderedCaptionProgress | null,
+): LearningTranscriptExperience {
+  const currentSourceCueIds = track.activeGroup?.cueIds ?? [];
+  if (!renderedProgress) return baseExperience(track.cues, currentSourceCueIds, playbackMs);
+  if (!renderedProgress.activeGroup || renderedProgress.cues.length === 0) {
+    return baseExperience(track.cues, [], playbackMs);
   }
-  return refinements;
+
+  const renderedById = new Map(renderedProgress.cues.map((cue) => [cue.id, cue]));
+  const renderedCues = renderedProgress.activeGroup.cueIds
+    .map((id) => renderedById.get(id))
+    .filter((cue): cue is CaptionCue => cue !== undefined);
+  if (renderedCues.length === 0) return baseExperience(track.cues, [], playbackMs);
+
+  const currentSourceIdSet = new Set(currentSourceCueIds);
+  const firstCurrentIndex = track.cues.findIndex((cue) => currentSourceIdSet.has(cue.id));
+  const insertionIndex = firstCurrentIndex < 0 ? track.cues.length : firstCurrentIndex;
+  const projectedTranscript: CaptionCue[] = [];
+  for (const [index, cue] of track.cues.entries()) {
+    if (index === insertionIndex) projectedTranscript.push(...renderedCues.map((renderedCue) => ({ ...renderedCue })));
+    if (!currentSourceIdSet.has(cue.id)) projectedTranscript.push(cue);
+  }
+  if (insertionIndex === track.cues.length) {
+    projectedTranscript.push(...renderedCues.map((renderedCue) => ({ ...renderedCue })));
+  }
+
+  const currentCueIds = renderedCues.map((cue) => cue.id);
+  const visibleCues = currentNeighborhood(projectedTranscript, currentCueIds, playbackMs);
+  const sourceIndices = sourceCueIndices(track.cues);
+  const sourceCueIndexByVisibleId: Record<string, number> = {};
+  for (const cue of visibleCues) {
+    const sourceIndex = sourceIndices[cue.id];
+    sourceCueIndexByVisibleId[cue.id] = sourceIndex ?? Math.max(0, insertionIndex);
+  }
+  return {
+    fullTranscript: track.cues,
+    visibleCues,
+    currentSourceCueIds,
+    currentCueIds,
+    sourceCueIndexByVisibleId,
+  };
 }
 
 export function projectLearningTranscriptExperience({
@@ -124,7 +153,7 @@ export function projectLearningTranscriptExperience({
   if (!track) return baseExperience([], [], playbackMs);
 
   if (track.source === 'visible-dom') {
-    return baseExperience(track.cues, track.activeGroup?.cueIds ?? [], playbackMs);
+    return projectVisibleDomExperience(track, playbackMs, renderedProgress);
   }
   if (playbackMs === null) return baseExperience(track.cues, [], playbackMs);
 
@@ -161,8 +190,7 @@ export function projectLearningTranscriptExperience({
     });
   }
 
-  const refinements = alignRenderedProgress(currentSourceCues, renderedCues);
-  if (!refinements) {
+  if (!canAlignRenderedProgress(currentSourceCues, renderedCues)) {
     return baseExperience(track.cues, currentSourceCueIds, playbackMs, {
       reason: 'text-mismatch',
       currentText,
@@ -170,19 +198,32 @@ export function projectLearningTranscriptExperience({
     });
   }
 
-  const projectedTranscript = track.cues.map((cue) => {
-    const text = refinements.get(cue.id);
-    return text === undefined ? cue : { ...cue, text };
-  });
-  const visibleCues = currentNeighborhood(projectedTranscript, currentSourceCueIds, playbackMs);
   const sourceIndices = sourceCueIndices(track.cues);
+  const firstCurrentIndex = sourceIndices[currentSourceCues[0].id];
+  const currentCueId = currentSourceCues.length === 1
+    ? currentSourceCues[0].id
+    : `current:${currentSourceCueIds.join('|')}`;
+  const currentCue: CaptionCue = {
+    id: currentCueId,
+    startMs: Math.min(...currentSourceCues.map((cue) => cue.startMs)),
+    endMs: Math.max(...currentSourceCues.map((cue) => cue.endMs)),
+    text: renderedText,
+  };
+  const currentSourceIdSet = new Set(currentSourceCueIds);
+  const projectedTranscript: CaptionCue[] = [];
+  for (const [index, cue] of track.cues.entries()) {
+    if (index === firstCurrentIndex) projectedTranscript.push(currentCue);
+    if (!currentSourceIdSet.has(cue.id)) projectedTranscript.push(cue);
+  }
+  const visibleCues = currentNeighborhood(projectedTranscript, [currentCueId], playbackMs);
+  const sourceCueIndexByVisibleId = Object.fromEntries(
+    visibleCues.map((cue) => [cue.id, sourceIndices[cue.id] ?? firstCurrentIndex]),
+  );
   return {
     fullTranscript: track.cues,
     visibleCues,
     currentSourceCueIds,
-    currentCueIds: currentSourceCueIds,
-    sourceCueIndexByVisibleId: Object.fromEntries(
-      visibleCues.map((cue) => [cue.id, sourceIndices[cue.id]]),
-    ),
+    currentCueIds: [currentCueId],
+    sourceCueIndexByVisibleId,
   };
 }

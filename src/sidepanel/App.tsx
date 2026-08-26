@@ -191,13 +191,23 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
           cues: [...message.track.cues].sort((left, right) => left.startMs - right.startMs),
           activeGroup: sanitizeActiveGroup(message.track),
         });
-        setRenderedProgress(null);
+        setRenderedProgress((current) => message.track.source === 'timedtext' ? null : current);
         setVideo({ id: message.videoId, title: message.videoTitle, url: message.videoUrl });
         setError(null);
         setRefreshing(false);
       }
       if (message.type === 'CAPTION_PROGRESS_UPDATED') {
         setRenderedProgress(message.progress);
+        setCaptionTrack((current) => {
+          if (current || !message.progress.activeGroup || message.progress.cues.length === 0) return current;
+          return {
+            language: 'en-visible',
+            isEnglish: true,
+            source: 'visible-dom',
+            cues: message.progress.cues,
+            activeGroup: message.progress.activeGroup,
+          };
+        });
       }
       if (message.type === 'CAPTION_DIAGNOSTIC') {
         setDiagnostics((current) => [...current.filter((entry) => entry.stage !== message.diagnostic.stage), message.diagnostic]);
