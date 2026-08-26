@@ -247,6 +247,45 @@ describe('content-script late-open state synchronization', () => {
     }));
   });
 
+  it('publishes fast rendered progress when an automatic Caption Track has no timedtext body', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    let currentTime = 29;
+    const video = document.createElement('video');
+    Object.defineProperty(video, 'currentTime', { configurable: true, get: () => currentTime });
+    const segment = document.createElement('span');
+    segment.className = 'ytp-caption-segment';
+    segment.textContent = 'I';
+    document.body.append(video, segment);
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '',
+    } as Response) as unknown as typeof fetch;
+
+    const { sendMessage } = await loadContentScriptRuntime({
+      fetchImpl,
+      waitForInitialResult: false,
+    });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      progress: expect.objectContaining({
+        cues: [expect.objectContaining({ text: 'I' })],
+      }),
+    })));
+    sendMessage.mockClear();
+
+    currentTime = 29.2;
+    segment.textContent = 'National League guy,.....Almost';
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      progress: expect.objectContaining({
+        cues: [expect.objectContaining({ text: 'National League guy,.....Almost' })],
+      }),
+    })));
+  });
+
   it('disconnects rendered progress monitoring when the progress message is rejected synchronously', async () => {
     setVideoUrl();
     setPlayerResponseScript(playerResponse);
