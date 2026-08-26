@@ -1,5 +1,4 @@
 import type { CaptionCue, RenderedCaptionProgress } from '../domain/types';
-import { splitCaptionText } from './caption-sentences';
 import { readRenderedCaptionText } from './rendered-caption-text';
 
 type RenderedCaptionProgressMonitorOptions = {
@@ -9,7 +8,7 @@ type RenderedCaptionProgressMonitorOptions = {
 };
 
 export type RenderedCaptionProgressMonitor = {
-  start(): void;
+  start(): boolean;
   stop(): void;
   captureNow(): boolean;
 };
@@ -53,13 +52,10 @@ export function createRenderedCaptionProgressMonitor(
       groupStartMs = captureTimeMs;
       cues = [];
     }
-    const segments = splitCaptionText(text);
-    cues = segments.map((segment, index) => {
-      const existing = cues[index];
-      return existing
-        ? { ...existing, text: segment.text, endMs: Math.max(existing.endMs, captureTimeMs + 1) }
-        : { id: `progress-${nextCueId++}`, startMs: groupStartMs!, endMs: captureTimeMs + 1, text: segment.text };
-    });
+    const existing = cues[0];
+    cues = [existing
+      ? { ...existing, text, endMs: Math.max(existing.endMs, captureTimeMs + 1) }
+      : { id: `progress-${nextCueId++}`, startMs: groupStartMs!, endMs: captureTimeMs + 1, text }];
     lastText = text;
     options.onProgressChanged({
       capturedAtMs: captureTimeMs,
@@ -71,13 +67,13 @@ export function createRenderedCaptionProgressMonitor(
 
   return {
     start() {
-      if (observer) return;
+      if (observer) return false;
       observer = new MutationObserver(() => captureNow());
       const root = options.document.querySelector('.ytp-caption-window-container')
         ?? options.document.querySelector('#movie_player')
         ?? options.document.body;
       observer.observe(root, { childList: true, characterData: true, subtree: true });
-      captureNow();
+      return captureNow();
     },
     stop() {
       observer?.disconnect();

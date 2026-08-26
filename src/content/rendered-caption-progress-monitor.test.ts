@@ -64,4 +64,30 @@ describe('rendered caption progress monitor', () => {
       activeGroup: { cueIds: ['progress-1'], startMs: 2_000 },
     });
   });
+
+  it('keeps one YouTube rendered block in one progress row despite punctuation', () => {
+    const segment = document.createElement('span');
+    segment.className = 'ytp-caption-segment';
+    segment.textContent = 'National League guy,.....Almost';
+    document.body.append(segment);
+    const onProgressChanged = vi.fn();
+    const monitor = createRenderedCaptionProgressMonitor({
+      document,
+      getCurrentTimeMs: () => 29_200,
+      onProgressChanged,
+    });
+
+    monitor.captureNow();
+
+    expect(onProgressChanged).toHaveBeenLastCalledWith({
+      capturedAtMs: 29_200,
+      cues: [{
+        id: 'progress-0',
+        startMs: 29_200,
+        endMs: 29_201,
+        text: 'National League guy,.....Almost',
+      }],
+      activeGroup: { cueIds: ['progress-0'], startMs: 29_200 },
+    });
+  });
 });

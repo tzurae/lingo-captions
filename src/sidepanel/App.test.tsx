@@ -985,6 +985,49 @@ describe('App history actions', () => {
     expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
   });
 
+  it('shows immediate rendered progress while the visible-DOM transcript catches up', async () => {
+    render(<App />);
+    await waitFor(() => expect(registeredListeners).toHaveLength(1));
+    const listener = registeredListeners[0];
+
+    await act(async () => listener({
+      type: 'VIDEO_CHANGED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+    }));
+    await act(async () => listener({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+      progress: {
+        capturedAtMs: 29_200,
+        cues: [{
+          id: 'progress-0',
+          startMs: 29_000,
+          endMs: 29_201,
+          text: 'National League guy,.....Almost',
+        }],
+        activeGroup: { cueIds: ['progress-0'], startMs: 29_000 },
+      },
+    }));
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en-visible',
+        isEnglish: true,
+        source: 'visible-dom',
+        cues: [{ id: 'visible-delayed', startMs: 29_000, endMs: 33_000, text: 'I' }],
+        activeGroup: { cueIds: ['visible-delayed'], startMs: 29_000 },
+      },
+    }));
+
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('progress-0');
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('National League guy,.....Almost');
+  });
+
   it('does not let rendered progress claim a video before its Caption Track arrives', async () => {
     render(<App />);
     await waitFor(() => expect(registeredListeners).toHaveLength(1));

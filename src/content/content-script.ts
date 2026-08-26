@@ -426,12 +426,19 @@ function startVisibleCaptionFallback(
   if (!captured) {
     currentState = [videoChangedMessage, failureDiagnostic, fallbackDiagnostic];
   }
-  return captured;
+  const capturedProgress = startRenderedCaptionProgressMonitor(videoId, version, true);
+  return captured || capturedProgress;
 }
 
-function startRenderedCaptionProgressMonitor(videoId: string, version: number): void {
-  visibleCaptionFallback?.stop();
-  visibleCaptionFallback = null;
+function startRenderedCaptionProgressMonitor(
+  videoId: string,
+  version: number,
+  preserveVisibleFallback = false,
+): boolean {
+  if (!preserveVisibleFallback) {
+    visibleCaptionFallback?.stop();
+    visibleCaptionFallback = null;
+  }
   renderedCaptionProgressMonitor?.stop();
   renderedCaptionProgressMonitor = createRenderedCaptionProgressMonitor({
     document,
@@ -450,7 +457,7 @@ function startRenderedCaptionProgressMonitor(videoId: string, version: number): 
       broadcastState(progressMessage);
     },
   });
-  renderedCaptionProgressMonitor.start();
+  return renderedCaptionProgressMonitor.start();
 }
 
 async function synchronizeVideo(
