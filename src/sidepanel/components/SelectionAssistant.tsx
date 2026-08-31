@@ -81,6 +81,8 @@ export function SelectionAssistant({
       if (event.key === 'Escape') onClose();
     };
     const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Element
+        && event.target.closest('[data-focused-study-action="preserve"]')) return;
       if (event.target instanceof Node && !assistantRef.current?.contains(event.target)) onClose();
     };
     document.addEventListener('keydown', closeOnEscape);

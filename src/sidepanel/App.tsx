@@ -6,7 +6,7 @@ import { defaultSettings } from '../storage/settings-store';
 import * as messageClient from './message-client';
 import { HistoryView } from './components/HistoryView';
 import { SelectionAssistant } from './components/SelectionAssistant';
-import { TranscriptPanel, type TranscriptSelection } from './components/TranscriptPanel';
+import { TranscriptPanel, type TranscriptPlaybackAction, type TranscriptSelection } from './components/TranscriptPanel';
 import { SettingsView } from './components/SettingsView';
 import { CaptionDiagnostics } from './components/CaptionDiagnostics';
 import { readOwnerTabId } from './panel-owner';
@@ -339,15 +339,33 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     }
   }
 
-  function replayCue(cue: CaptionCue): void {
+  function handlePlaybackAction(action: TranscriptPlaybackAction, cue: CaptionCue): void {
     const activeTabId = ownerTabId ?? activeTabIdRef.current;
     if (activeTabId === undefined || !chrome.tabs) return;
-    const timeMs = captionSource === 'visible-dom'
-      && activeGroup
-      && activeGroup.cueIds.includes(cue.id)
-      ? activeGroup.startMs
-      : cue.startMs;
-    void chrome.tabs.sendMessage(activeTabId, { type: 'SEEK_TO_TIME', timeMs: Math.max(0, timeMs) });
+    const belongsToVisibleGroup = captionSource === 'visible-dom'
+      && activeGroup?.cueIds.includes(cue.id);
+    const startMs = belongsToVisibleGroup ? activeGroup?.startMs ?? cue.startMs : cue.startMs;
+    if (action === 'jump') {
+      void chrome.tabs.sendMessage(activeTabId, { type: 'JUMP_TO_HERE', timeMs: Math.max(0, startMs) });
+      return;
+    }
+    if (action === 'play-from-here') {
+      clearAssistant();
+      void chrome.tabs.sendMessage(activeTabId, { type: 'PLAY_FROM_HERE', timeMs: Math.max(0, startMs) });
+      return;
+    }
+
+    const activeCueIds = new Set(belongsToVisibleGroup ? activeGroup?.cueIds : []);
+    const activeEndMs = belongsToVisibleGroup
+      ? captionTrack?.cues
+        .filter((candidate) => activeCueIds.has(candidate.id))
+        .reduce((endMs, candidate) => Math.max(endMs, candidate.endMs), cue.endMs) ?? cue.endMs
+      : cue.endMs;
+    void chrome.tabs.sendMessage(activeTabId, {
+      type: 'REPLAY_RANGE',
+      startMs: Math.max(0, startMs),
+      endMs: Math.max(startMs + 1, activeEndMs),
+    });
   }
 
   const context = useMemo(() => selection ? {
@@ -453,7 +471,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         fontSize={settings.fontSize}
         textColor={settings.textColor}
         onSelection={selectTranscript}
-        onReplay={replayCue}
+        onPlaybackAction={handlePlaybackAction}
       />
       {selection && <SelectionAssistant
         selectedText={completedRequest?.selectedText ?? selection.selectedText}

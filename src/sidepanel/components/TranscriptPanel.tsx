@@ -3,6 +3,8 @@ import { useLayoutEffect, useMemo, useRef } from 'react';
 
 export type TranscriptSelection = { selectedText: string; cueIndex: number; sentence: string; anchor: { x: number; y: number } };
 
+export type TranscriptPlaybackAction = 'jump' | 'replay' | 'play-from-here';
+
 type Props = {
   cues: CaptionCue[];
   sourceCues?: CaptionCue[];
@@ -12,7 +14,7 @@ type Props = {
   fontSize?: number;
   textColor?: string;
   onSelection: (selection: TranscriptSelection) => void;
-  onReplay: (cue: CaptionCue) => void;
+  onPlaybackAction: (action: TranscriptPlaybackAction, cue: CaptionCue) => void;
 };
 
 type CueEntry = {
@@ -32,7 +34,7 @@ export function TranscriptPanel({
   fontSize,
   textColor,
   onSelection,
-  onReplay,
+  onPlaybackAction,
 }: Props) {
   const orderedCues = useMemo(() => [...cues].sort((a, b) => a.startMs - b.startMs), [cues]);
   const orderedSourceCues = useMemo(
@@ -87,17 +89,36 @@ export function TranscriptPanel({
   });
   const visibleEntries = allEntries;
 
-  function reportSelection(event: React.MouseEvent<HTMLElement> | React.KeyboardEvent<HTMLElement> | React.PointerEvent<HTMLElement>): boolean {
+  function formatTimestamp(timeMs: number): string {
+    const totalSeconds = Math.max(0, Math.floor(timeMs / 1_000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  function selectedTranscriptText(range: Range): string {
+    const contents = range.cloneContents();
+    contents.querySelectorAll('.caption-row-actions').forEach((actions) => actions.remove());
+    const cueTexts = Array.from(contents.querySelectorAll('.caption-cue'))
+      .map((cue) => cue.textContent?.trim() ?? '')
+      .filter(Boolean);
+    return (cueTexts.length > 0 ? cueTexts.join(' ') : contents.textContent ?? '').trim();
+  }
+
+  function reportSelection(event: React.KeyboardEvent<HTMLElement> | React.PointerEvent<HTMLElement>): boolean {
     const browserSelection = window.getSelection();
-    const text = browserSelection?.toString().trim() ?? '';
     const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-cue-index]') : null;
-    if (!text || !target) return false;
+    if (!browserSelection || browserSelection.isCollapsed || !target || browserSelection.rangeCount === 0) {
+      return false;
+    }
+    const range = browserSelection.getRangeAt(0);
+    if (!range.intersectsNode(target)) return false;
+    const text = selectedTranscriptText(range);
+    if (text === '') return false;
     const sourceCueIndex = Number(target.dataset.cueIndex);
     const sourceCue = orderedSourceCues[sourceCueIndex];
     if (!sourceCue) return false;
-    const rect = browserSelection && browserSelection.rangeCount > 0
-      ? browserSelection.getRangeAt(0).getBoundingClientRect()
-      : target.getBoundingClientRect();
+    const rect = range.getBoundingClientRect();
     onSelection({
       selectedText: text,
       cueIndex: sourceCueIndex,
@@ -107,32 +128,42 @@ export function TranscriptPanel({
     return true;
   }
 
-  function replayCue(event: React.PointerEvent<HTMLElement> | React.KeyboardEvent<HTMLElement>) {
-    if (reportSelection(event)) return;
-    const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-cue-index]') : null;
-    const sourceCueIndex = target ? Number(target.dataset.cueIndex) : Number.NaN;
-    const sourceCue = orderedSourceCues[sourceCueIndex];
-    if (sourceCue) onReplay(sourceCue);
-  }
-
   if (orderedCues.length === 0) {
     return <p role="status">No English captions are available.</p>;
   }
 
-  const renderCue = ({ cue, sourceCueIndex, state }: CueEntry) => (
-    <p
-      key={cue.id}
-      data-cue-index={sourceCueIndex}
-      data-cue-state={autoFollowPlayback ? state : undefined}
-      aria-current={currentIdSet.has(cue.id) ? 'true' : undefined}
-      className="caption-cue"
-      tabIndex={0}
-      onPointerUp={replayCue}
-      onKeyDown={(event) => { if (event.key === 'Enter') replayCue(event); }}
-    >
-      {cue.text}
-    </p>
-  );
+  const renderCue = ({ cue, sourceCueIndex, state }: CueEntry) => {
+    const sourceCue = orderedSourceCues[sourceCueIndex] ?? cue;
+    const timestamp = formatTimestamp(sourceCue.startMs);
+    return (
+      <div key={cue.id} className="caption-row">
+        <button
+          type="button"
+          className="caption-timestamp"
+          aria-label={`Play from ${timestamp}`}
+          onClick={() => onPlaybackAction('play-from-here', sourceCue)}
+        >
+          {timestamp}
+        </button>
+        <p
+          data-cue-index={sourceCueIndex}
+          data-cue-state={autoFollowPlayback ? state : undefined}
+          aria-current={currentIdSet.has(cue.id) ? 'true' : undefined}
+          className="caption-cue"
+          tabIndex={0}
+          onClick={(event) => event.currentTarget.focus()}
+          onPointerUp={reportSelection}
+        >
+          {cue.text}
+        </p>
+        <div className="caption-row-actions" aria-label={`Actions for ${sourceCue.text}`}>
+          <button type="button" data-focused-study-action="preserve" aria-label={`Jump to Here: ${sourceCue.text}`} onClick={() => onPlaybackAction('jump', sourceCue)}>Jump to Here</button>
+          <button type="button" data-focused-study-action="preserve" aria-label={`Replay: ${sourceCue.text}`} onClick={() => onPlaybackAction('replay', sourceCue)}>Replay</button>
+          <button type="button" aria-label={`Play from Here: ${sourceCue.text}`} onClick={() => onPlaybackAction('play-from-here', sourceCue)}>Play from Here</button>
+        </div>
+      </div>
+    );
+  };
 
   const transcriptStyle = {
     ...(fontSize === undefined ? {} : { fontSize: `${fontSize}px` }),

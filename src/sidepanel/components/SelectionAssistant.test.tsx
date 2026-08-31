@@ -150,12 +150,13 @@ describe('SelectionAssistant', () => {
     expect(screen.getByText('回答完成，但無法寫入歷史。')).toBeInTheDocument();
   });
 
-  it('keeps actions open after choosing an intent and closes the whole assistant on outside pointer or Escape', async () => {
+  it('preserves Focused Study actions and closes on other outside pointers or Escape', async () => {
     const user = userEvent.setup();
     const onChooseIntent = vi.fn();
     const onClose = vi.fn();
     render(<>
       <button type="button">Outside</button>
+      <button type="button" data-focused-study-action="preserve">Replay outside</button>
       <SelectionAssistant
         selectedText="selected phrase"
         anchor={{ x: 120, y: 80 }}
@@ -168,6 +169,9 @@ describe('SelectionAssistant', () => {
     expect(onChooseIntent).toHaveBeenCalledWith('translate_sentence', undefined);
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: 'Replay outside' }));
+    expect(onClose).not.toHaveBeenCalled();
 
     fireEvent.pointerDown(screen.getByRole('button', { name: 'Outside' }));
     expect(onClose).toHaveBeenCalledTimes(1);

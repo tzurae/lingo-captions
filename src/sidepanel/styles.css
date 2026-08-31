@@ -15,6 +15,14 @@ button, input, select { font: inherit; }
 .focus-past { grid-row-start: 1; align-self: end; }
 .focus-current { grid-row-start: 2; }
 .focus-future { grid-row-start: 3; align-self: start; }
+.caption-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; align-items: start; }
+.caption-timestamp { grid-column: 1; margin-top: 8px; padding: 3px 5px; border: 0; border-radius: 4px; background: transparent; color: #475569; font-size: 12px; }
+.caption-timestamp:hover, .caption-timestamp:focus { background: #e2e8f0; color: #0f172a; }
+.caption-row .caption-cue { grid-column: 2; min-width: 0; }
+.caption-row-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; opacity: 0; pointer-events: none; user-select: none; transition: opacity 140ms ease; }
+.caption-row-actions button { padding: 4px 7px; border: 1px solid #cbd5e1; border-radius: 5px; background: white; color: #334155; font-size: 12px; }
+.caption-row-actions button:hover, .caption-row-actions button:focus { border-color: #94a3b8; background: #f1f5f9; }
+.caption-row:hover .caption-row-actions, .caption-row:focus-within .caption-row-actions { opacity: 1; pointer-events: auto; }
 .caption-cue { margin: 0; padding: 12px; border: 1px solid #d1d5db; border-radius: 8px; background: white; cursor: text; transition: background-color 140ms ease, border-color 140ms ease, opacity 140ms ease; }
 .transcript-focus-window .caption-cue[data-cue-state='past'] { opacity: 0.4; }
 .transcript-focus-window .caption-cue[data-cue-state='current'] { opacity: 1; }
@@ -59,4 +67,5 @@ button, input, select { font: inherit; }
 label { display: grid; gap: 4px; }
 input, select { max-width: 100%; padding: 6px; }
 @media (max-width: 280px) { .sidepanel-app { padding: 8px; } button { padding: 6px; } }
-@media (prefers-reduced-motion: reduce) { .caption-cue { transition: none; } }
+@media (hover: none) { .caption-row-actions { opacity: 1; pointer-events: auto; } }
+@media (prefers-reduced-motion: reduce) { .caption-cue, .caption-row-actions { transition: none; } }

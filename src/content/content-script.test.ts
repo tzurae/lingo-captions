@@ -658,7 +658,29 @@ describe('content-script late-open state synchronization', () => {
     expect(replayedState[2]).toEqual({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 12345 });
   });
 
-  it('seeks, starts playback, and immediately reports playback for a requested time', async () => {
+  it.each([true, false])('jumps without changing a paused=%s playback intent', async (paused) => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const video = document.createElement('video');
+    const play = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
+    Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
+    Object.defineProperty(video, 'paused', { configurable: true, value: paused });
+    Object.defineProperty(video, 'play', { configurable: true, value: play });
+    Object.defineProperty(video, 'pause', { configurable: true, value: pause });
+    document.body.append(video);
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    sendMessage.mockClear();
+
+    onMessage?.({ type: 'JUMP_TO_HERE', timeMs: 500 });
+
+    expect(video.currentTime).toBe(0.5);
+    expect(play).not.toHaveBeenCalled();
+    expect(pause).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 500 });
+  });
+
+  it('plays continuously from an explicit historical time', async () => {
     setVideoUrl();
     setPlayerResponseScript(playerResponse);
     const video = document.createElement('video');
@@ -666,27 +688,77 @@ describe('content-script late-open state synchronization', () => {
     Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
     Object.defineProperty(video, 'play', { configurable: true, value: play });
     document.body.append(video);
-    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
-    sendMessage.mockClear();
+    const { onMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    onMessage?.({ type: 'SEEK_TO_TIME', timeMs: 500 });
+    onMessage?.({ type: 'PLAY_FROM_HERE', timeMs: 500 });
 
     expect(video.currentTime).toBe(0.5);
     expect(play).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 500 });
   });
 
-  it('accepts a zero seek time for a cue near the start of the video', async () => {
+  it('replays one range and pauses at its end', async () => {
     setVideoUrl();
     setPlayerResponseScript(playerResponse);
     const video = document.createElement('video');
+    const play = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
     Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
-    Object.defineProperty(video, 'play', { configurable: true, value: vi.fn().mockResolvedValue(undefined) });
+    Object.defineProperty(video, 'play', { configurable: true, value: play });
+    Object.defineProperty(video, 'pause', { configurable: true, value: pause });
     document.body.append(video);
     const { onMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    onMessage?.({ type: 'SEEK_TO_TIME', timeMs: 0 });
+    onMessage?.({ type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 });
+    expect(video.currentTime).toBe(0.5);
+    expect(play).toHaveBeenCalledTimes(1);
+    video.currentTime = 1.5;
+    video.dispatchEvent(new Event('timeupdate'));
 
-    expect(video.currentTime).toBe(0);
+    expect(pause).toHaveBeenCalledTimes(1);
+  });
+
+  it('clamps an overshooting Replay Range to its exact end before pausing', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const video = document.createElement('video');
+    const play = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
+    Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
+    Object.defineProperty(video, 'play', { configurable: true, value: play });
+    Object.defineProperty(video, 'pause', { configurable: true, value: pause });
+    document.body.append(video);
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+
+    onMessage?.({ type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 });
+    video.currentTime = 1.75;
+    video.dispatchEvent(new Event('timeupdate'));
+
+    expect(video.currentTime).toBe(1.5);
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 1_500,
+    });
+  });
+
+  it('cancels a Replay Range when YouTube navigation reuses the video element', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const video = document.createElement('video');
+    const play = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
+    Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
+    Object.defineProperty(video, 'play', { configurable: true, value: play });
+    Object.defineProperty(video, 'pause', { configurable: true, value: pause });
+    document.body.append(video);
+    const { onMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+
+    onMessage?.({ type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 });
+    document.dispatchEvent(new Event('yt-navigate-finish'));
+    video.currentTime = 1.5;
+    video.dispatchEvent(new Event('timeupdate'));
+
+    expect(pause).not.toHaveBeenCalled();
   });
 });
