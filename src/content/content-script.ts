@@ -42,6 +42,7 @@ let activeVideo: HTMLVideoElement | null = null;
 let currentState: SynchronizableMessage[] = [];
 let visibleCaptionFallback: VisibleCaptionFallback | null = null;
 let renderedCaptionProgressMonitor: RenderedCaptionProgressMonitor | null = null;
+let replayEndMs: number | null = null;
 let synchronizationVersion = 0;
 
 function sendMessage(message: ContentMessage): void {
@@ -325,14 +326,48 @@ function broadcastState(message: SynchronizableMessage): void {
 
 function isSidePanelContentMessage(message: unknown): message is SidePanelContentMessage {
   if (typeof message !== 'object' || message === null) return false;
-  const type = (message as { type?: unknown }).type;
-  return type === 'REQUEST_STATE' || (type === 'SEEK_TO_TIME' && typeof (message as { timeMs?: unknown }).timeMs === 'number');
+  const candidate = message as { type?: unknown; timeMs?: unknown; startMs?: unknown; endMs?: unknown };
+  if (candidate.type === 'REQUEST_STATE') return true;
+  if ((candidate.type === 'JUMP_TO_HERE' || candidate.type === 'PLAY_FROM_HERE')
+    && typeof candidate.timeMs === 'number'
+    && Number.isFinite(candidate.timeMs)) {
+    return true;
+  }
+  return candidate.type === 'REPLAY_RANGE'
+    && typeof candidate.startMs === 'number'
+    && Number.isFinite(candidate.startMs)
+    && typeof candidate.endMs === 'number'
+    && Number.isFinite(candidate.endMs);
 }
 
-function seekToTime(timeMs: number): void {
-  const video = document.querySelector('video') ?? activeVideo;
+function playbackVideo(): HTMLVideoElement | null {
+  return document.querySelector('video') ?? activeVideo;
+}
+
+function jumpToHere(timeMs: number): void {
+  const video = playbackVideo();
   if (!video) return;
+  replayEndMs = null;
   video.currentTime = Math.max(0, timeMs) / 1000;
+  sendCurrentPlayback();
+}
+
+function playFromHere(timeMs: number): void {
+  const video = playbackVideo();
+  if (!video) return;
+  replayEndMs = null;
+  video.currentTime = Math.max(0, timeMs) / 1000;
+  void video.play().catch(() => undefined);
+  sendCurrentPlayback();
+}
+
+function replayRange(startMs: number, endMs: number): void {
+  const video = playbackVideo();
+  if (!video) return;
+  bindPlayback(video);
+  const normalizedStartMs = Math.max(0, startMs);
+  replayEndMs = Math.max(normalizedStartMs + 1, endMs);
+  video.currentTime = normalizedStartMs / 1000;
   void video.play().catch(() => undefined);
   sendCurrentPlayback();
 }
@@ -358,16 +393,24 @@ function bindPlayback(video: HTMLVideoElement): void {
   }
 
   activeVideo = video;
+  replayEndMs = null;
   video.addEventListener('timeupdate', () => {
+    if (video !== activeVideo) return;
     const videoId = getVideoId();
-    const now = Date.now();
-
-    if (!videoId || now - lastPlaybackMessageAt < playbackIntervalMs) {
+    if (!videoId) return;
+    const currentTimeMs = Math.round(video.currentTime * 1000);
+    if (replayEndMs !== null && currentTimeMs >= replayEndMs) {
+      const completedReplayEndMs = replayEndMs;
+      replayEndMs = null;
+      video.currentTime = completedReplayEndMs / 1000;
+      video.pause();
+      sendMessage({ type: 'PLAYBACK_UPDATED', videoId, currentTimeMs: completedReplayEndMs });
       return;
     }
-
+    const now = Date.now();
+    if (now - lastPlaybackMessageAt < playbackIntervalMs) return;
     lastPlaybackMessageAt = now;
-    sendMessage({ type: 'PLAYBACK_UPDATED', videoId, currentTimeMs: Math.round(video.currentTime * 1000) });
+    sendMessage({ type: 'PLAYBACK_UPDATED', videoId, currentTimeMs });
   });
 }
 
@@ -570,8 +613,16 @@ if (typeof chrome !== 'undefined') {
     if (!isSidePanelContentMessage(message)) {
       return;
     }
-    if (message.type === 'SEEK_TO_TIME') {
-      seekToTime(message.timeMs);
+    if (message.type === 'JUMP_TO_HERE') {
+      jumpToHere(message.timeMs);
+      return;
+    }
+    if (message.type === 'PLAY_FROM_HERE') {
+      playFromHere(message.timeMs);
+      return;
+    }
+    if (message.type === 'REPLAY_RANGE') {
+      replayRange(message.startMs, message.endMs);
       return;
     }
 
@@ -586,6 +637,7 @@ if (typeof chrome !== 'undefined') {
 }
 
 document.addEventListener('yt-navigate-finish', () => {
+  replayEndMs = null;
   visibleCaptionFallback?.stop();
   visibleCaptionFallback = null;
   void synchronizeVideo(false, true);

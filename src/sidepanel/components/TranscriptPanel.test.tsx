@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { TranscriptPanel } from './TranscriptPanel';
 
@@ -30,7 +31,7 @@ describe('TranscriptPanel', () => {
       fontSize={22}
       textColor="#123456"
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getByRole('region', { name: 'Transcript' })).toHaveStyle({
@@ -40,7 +41,13 @@ describe('TranscriptPanel', () => {
   });
 
   it('renders cues in time order and marks the current cue', () => {
-    render(<TranscriptPanel cues={cues} currentCueIds={['two']} autoFollowPlayback={false} onSelection={vi.fn()} onReplay={vi.fn()} />);
+    render(<TranscriptPanel
+      cues={cues}
+      currentCueIds={['two']}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={vi.fn()}
+    />);
 
     const transcript = screen.getByRole('region', { name: 'Transcript' });
     expect(transcript).toHaveClass('transcript-list');
@@ -51,8 +58,14 @@ describe('TranscriptPanel', () => {
 
   it('reports the selected text and containing cue', () => {
     const onSelection = vi.fn();
-    const onReplay = vi.fn();
-    render(<TranscriptPanel cues={cues} currentCueIds={[]} autoFollowPlayback={false} onSelection={onSelection} onReplay={onReplay} />);
+    const onPlaybackAction = vi.fn();
+    render(<TranscriptPanel
+      cues={cues}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={onSelection}
+      onPlaybackAction={onPlaybackAction}
+    />);
 
     const cue = screen.getByText('First cue');
     vi.spyOn(cue, 'getBoundingClientRect').mockReturnValue({ left: 0, width: 300, bottom: 400 } as DOMRect);
@@ -73,12 +86,12 @@ describe('TranscriptPanel', () => {
       sentence: 'First cue',
       anchor: { x: 60, y: 110 },
     });
-    expect(onReplay).not.toHaveBeenCalled();
+    expect(onPlaybackAction).not.toHaveBeenCalled();
   });
 
   it('uses full source context for a differently segmented rendered cue', () => {
     const onSelection = vi.fn();
-    const onReplay = vi.fn();
+    const onPlaybackAction = vi.fn();
     const sourceCue = { id: 'source', startMs: 1_000, endMs: 2_000, text: 'I think we should start.' };
     const renderedCue = { id: 'rendered', startMs: 1_200, endMs: 1_500, text: 'I think we should' };
     render(<TranscriptPanel
@@ -88,7 +101,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['rendered']}
       autoFollowPlayback
       onSelection={onSelection}
-      onReplay={onReplay}
+      onPlaybackAction={onPlaybackAction}
     />);
 
     const cue = screen.getByText('I think we should');
@@ -111,29 +124,189 @@ describe('TranscriptPanel', () => {
     });
     selection?.removeAllRanges();
     fireEvent.pointerUp(cue);
-    expect(onReplay).toHaveBeenCalledWith(sourceCue);
+    expect(onPlaybackAction).not.toHaveBeenCalled();
   });
 
-  it('replays a cue when it receives a pointer interaction without selected text', () => {
-    const onReplay = vi.fn();
-    render(<TranscriptPanel cues={cues} currentCueIds={[]} autoFollowPlayback={false} onSelection={vi.fn()} onReplay={onReplay} />);
+  it('accepts non-collapsed short and punctuation-only selections', () => {
+    const onSelection = vi.fn();
+    const onPlaybackAction = vi.fn();
+    const cue = { id: 'selection-edge', startMs: 0, endMs: 1_000, text: 'I, ...' };
+    render(<TranscriptPanel
+      cues={[cue]}
+      currentCueIds={['selection-edge']}
+      autoFollowPlayback
+      onSelection={onSelection}
+      onPlaybackAction={onPlaybackAction}
+    />);
+    const row = screen.getByText('I, ...');
+    const textNode = row.firstChild!;
+    const selection = window.getSelection()!;
 
-    fireEvent.pointerUp(screen.getByText('First cue'));
+    const shortRange = document.createRange();
+    shortRange.setStart(textNode, 0);
+    shortRange.setEnd(textNode, 1);
+    Object.defineProperty(shortRange, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 20, width: 20, bottom: 110 } as DOMRect),
+    });
+    selection.removeAllRanges();
+    selection.addRange(shortRange);
+    fireEvent.pointerUp(row);
+    expect(onSelection).toHaveBeenCalledOnce();
 
-    expect(onReplay).toHaveBeenCalledWith({ id: 'one', startMs: 1_000, endMs: 2_000, text: 'First cue' });
+    const punctuationRange = document.createRange();
+    punctuationRange.setStart(textNode, 1);
+    punctuationRange.setEnd(textNode, 2);
+    Object.defineProperty(punctuationRange, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 40, width: 10, bottom: 110 } as DOMRect),
+    });
+    selection.removeAllRanges();
+    selection.addRange(punctuationRange);
+    fireEvent.pointerUp(row);
+    expect(onSelection).toHaveBeenNthCalledWith(2, expect.objectContaining({ selectedText: ',' }));
+
+    const collapsedRange = document.createRange();
+    collapsedRange.setStart(textNode, 1);
+    collapsedRange.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(collapsedRange);
+    fireEvent.pointerUp(row);
+
+    expect(onSelection).toHaveBeenCalledTimes(2);
+    expect(onPlaybackAction).not.toHaveBeenCalled();
   });
 
-  it('replays a focused cue when Enter is pressed', () => {
-    const onReplay = vi.fn();
-    render(<TranscriptPanel cues={cues} currentCueIds={[]} autoFollowPlayback={false} onSelection={vi.fn()} onReplay={onReplay} />);
+  it('opens the assistant for a reverse selection spanning rendered rows', () => {
+    const onSelection = vi.fn();
+    const selection = window.getSelection()!;
+    render(<TranscriptPanel
+      cues={cues}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={onSelection}
+      onPlaybackAction={vi.fn()}
+    />);
+    const firstCue = screen.getByText('First cue');
+    const secondCue = screen.getByText('Second cue');
+    selection.removeAllRanges();
+    selection.setBaseAndExtent(secondCue.firstChild!, 6, firstCue.firstChild!, 0);
+    Object.defineProperty(selection.getRangeAt(0), 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 10, width: 100, bottom: 120 } as DOMRect),
+    });
+
+    fireEvent.pointerUp(firstCue);
+
+    expect(onSelection).toHaveBeenCalledWith(expect.objectContaining({
+      selectedText: 'First cue Second',
+    }));
+  });
+
+  it('never replays from plain transcript pointer interactions', () => {
+    const onPlaybackAction = vi.fn();
+    render(<TranscriptPanel
+      cues={cues}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={onPlaybackAction}
+    />);
+
+    const cue = screen.getByText('First cue');
+    for (let index = 0; index < 300; index += 1) fireEvent.pointerUp(cue);
+    expect(onPlaybackAction).not.toHaveBeenCalled();
+  });
+
+  it('does not hide replay behind Enter on transcript text', () => {
+    const onPlaybackAction = vi.fn();
+    render(<TranscriptPanel
+      cues={cues}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={onPlaybackAction}
+    />);
 
     fireEvent.keyDown(screen.getByText('First cue'), { key: 'Enter' });
 
-    expect(onReplay).toHaveBeenCalledWith({ id: 'one', startMs: 1_000, endMs: 2_000, text: 'First cue' });
+    expect(onPlaybackAction).not.toHaveBeenCalled();
+  });
+
+  it('exposes explicit timestamp, Jump, Replay, and Play from Here controls', async () => {
+    const user = userEvent.setup();
+    const onPlaybackAction = vi.fn();
+    render(<TranscriptPanel
+      cues={cues}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={onPlaybackAction}
+    />);
+
+    await user.click(screen.getByRole('button', { name: 'Play from 00:01' }));
+    await user.click(screen.getByRole('button', { name: 'Jump to Here: First cue' }));
+    await user.click(screen.getByRole('button', { name: 'Replay: First cue' }));
+    await user.click(screen.getByRole('button', { name: 'Play from Here: First cue' }));
+
+    expect(onPlaybackAction.mock.calls).toEqual([
+      ['play-from-here', expect.objectContaining({ id: 'one' })],
+      ['jump', expect.objectContaining({ id: 'one' })],
+      ['replay', expect.objectContaining({ id: 'one' })],
+      ['play-from-here', expect.objectContaining({ id: 'one' })],
+    ]);
+  });
+
+  it('keeps row text inert while exposing playback controls in keyboard focus order', async () => {
+    const user = userEvent.setup();
+    const onPlaybackAction = vi.fn();
+    render(<TranscriptPanel
+      cues={[cues[1]]}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={onPlaybackAction}
+    />);
+    const cueText = screen.getByText('First cue');
+    const timestamp = screen.getByRole('button', { name: 'Play from 00:01' });
+    const jump = screen.getByRole('button', { name: 'Jump to Here: First cue' });
+    const replay = screen.getByRole('button', { name: 'Replay: First cue' });
+    const playFromHere = screen.getByRole('button', { name: 'Play from Here: First cue' });
+
+    await user.tab();
+    expect(timestamp).toHaveFocus();
+    await user.keyboard('{Enter}');
+    await user.tab();
+    expect(cueText).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(onPlaybackAction).toHaveBeenCalledTimes(1);
+
+    await user.tab();
+    expect(jump).toHaveFocus();
+    await user.keyboard(' ');
+    await user.tab();
+    expect(replay).toHaveFocus();
+    await user.keyboard('{Enter}');
+    await user.tab();
+    expect(playFromHere).toHaveFocus();
+    await user.keyboard(' ');
+
+    expect(onPlaybackAction.mock.calls.map(([action]) => action)).toEqual([
+      'play-from-here',
+      'jump',
+      'replay',
+      'play-from-here',
+    ]);
   });
 
   it('explains when no English captions are available', () => {
-    render(<TranscriptPanel cues={[]} currentCueIds={[]} autoFollowPlayback={false} onSelection={vi.fn()} onReplay={vi.fn()} />);
+    render(<TranscriptPanel
+      cues={[]}
+      currentCueIds={[]}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={vi.fn()}
+    />);
 
     expect(screen.getByText('No English captions are available.')).toBeInTheDocument();
   });
@@ -146,7 +319,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-4']}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getByRole('region', { name: 'Transcript' })).toHaveClass('transcript-focus-window');
@@ -165,7 +338,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-1']}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getByText('Cue one')).toHaveAttribute('data-cue-state', 'current');
@@ -179,7 +352,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-7']}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.queryByText('Cue five')).not.toBeInTheDocument();
@@ -196,7 +369,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-4']}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     rerender(<TranscriptPanel
@@ -206,7 +379,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={[]}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getByText('Cue four')).toHaveAttribute('data-cue-state', 'current');
@@ -220,7 +393,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={[]}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getAllByText(/^Cue /)).toHaveLength(3);
@@ -228,7 +401,13 @@ describe('TranscriptPanel', () => {
   });
 
   it('renders the complete transcript when automatic following is disabled', () => {
-    render(<TranscriptPanel cues={focusCues} currentCueIds={['cue-4']} autoFollowPlayback={false} onSelection={vi.fn()} onReplay={vi.fn()} />);
+    render(<TranscriptPanel
+      cues={focusCues}
+      currentCueIds={['cue-4']}
+      autoFollowPlayback={false}
+      onSelection={vi.fn()}
+      onPlaybackAction={vi.fn()}
+    />);
 
     expect(screen.getAllByText(/^Cue /)).toHaveLength(7);
     expect(screen.getByText('Cue one')).toBeInTheDocument();
@@ -245,7 +424,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-4']}
       autoFollowPlayback
       onSelection={onSelection}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
     const cue = screen.getByText('Cue three');
     const range = document.createRange();
@@ -276,7 +455,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-4']}
       autoFollowPlayback
       onSelection={onSelection}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
     const cue = screen.getByText('Cue four');
     const range = document.createRange();
@@ -303,7 +482,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-3', 'cue-4', 'cue-5']}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getByRole('region', { name: 'Transcript' })
@@ -322,7 +501,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-6', 'cue-7']}
       autoFollowPlayback
       onSelection={vi.fn()}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
 
     expect(screen.getAllByText(/^Cue /)).toHaveLength(3);
@@ -340,7 +519,7 @@ describe('TranscriptPanel', () => {
       currentCueIds={['cue-3', 'cue-4', 'cue-5']}
       autoFollowPlayback
       onSelection={onSelection}
-      onReplay={vi.fn()}
+      onPlaybackAction={vi.fn()}
     />);
     const cue = screen.getByText('Cue five');
     const range = document.createRange();

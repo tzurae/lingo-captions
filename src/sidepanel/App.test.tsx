@@ -14,18 +14,20 @@ vi.mock('./message-client', () => ({
 }));
 
 vi.mock('./components/TranscriptPanel', () => ({
-  TranscriptPanel: ({ cues, onSelection, onReplay, currentCueIds = [], autoFollowPlayback }: {
+  TranscriptPanel: ({ cues, onSelection, onPlaybackAction, currentCueIds = [], autoFollowPlayback }: {
     cues: CaptionCue[];
     onSelection: (selection: { selectedText: string; cueIndex: number; sentence: string; anchor: { x: number; y: number } }) => void;
-    onReplay: (cue: CaptionCue) => void;
+    onPlaybackAction: (action: 'jump' | 'replay' | 'play-from-here', cue: CaptionCue) => void;
     currentCueIds: string[];
     autoFollowPlayback: boolean;
   }) => <>
     <div data-testid="transcript-cues">{cues.map((cue) => cue.text).join(' ')}</div>
     <button type="button" onClick={() => onSelection({ selectedText: 'selected phrase', cueIndex: 0, sentence: 'A selected phrase.', anchor: { x: 10, y: 20 } })}>Select transcript text</button>
     <button type="button" onClick={() => onSelection({ selectedText: 'middle phrase', cueIndex: 1, sentence: 'Stale sentence.', anchor: { x: 10, y: 20 } })}>Select middle transcript text</button>
-    <button type="button" onClick={() => cues[0] && onReplay(cues[0])}>Replay first cue</button>
-    <button type="button" onClick={() => cues[1] && onReplay(cues[1])}>Replay second cue</button>
+    <button type="button" data-focused-study-action="preserve" onClick={() => cues[0] && onPlaybackAction('replay', cues[0])}>Replay first cue</button>
+    <button type="button" data-focused-study-action="preserve" onClick={() => cues[1] && onPlaybackAction('replay', cues[1])}>Replay second cue</button>
+    <button type="button" data-focused-study-action="preserve" onClick={() => cues[0] && onPlaybackAction('jump', cues[0])}>Jump first cue</button>
+    <button type="button" onClick={() => cues[0] && onPlaybackAction('play-from-here', cues[0])}>Play from first cue</button>
     <output data-testid="current-cues">{currentCueIds.join(',') || 'none'}</output>
     <output data-testid="auto-follow">{String(autoFollowPlayback)}</output>
   </>,
@@ -207,7 +209,7 @@ describe('App history actions', () => {
     expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
   });
 
-  it('seeks to the exact start of a replayed cue in the active tab', async () => {
+  it('sends the exact Replay Range for a timed cue in the active tab', async () => {
     const user = userEvent.setup();
     const query = vi.fn().mockResolvedValue([{ id: 42 }]);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
@@ -225,10 +227,10 @@ describe('App history actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'SEEK_TO_TIME', timeMs: 1_000 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
   });
 
-  it('seeks to the exact zero start of a replayed cue', async () => {
+  it('accepts an exact zero start for a Replay Range', async () => {
     const user = userEvent.setup();
     const query = vi.fn().mockResolvedValue([{ id: 42 }]);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
@@ -246,7 +248,38 @@ describe('App history actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'SEEK_TO_TIME', timeMs: 0 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', startMs: 0, endMs: 1_000 });
+  });
+
+  it('sends distinct Jump and Play from Here intents and exits Focused Study', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 1_000, endMs: 2_000, text: 'A historical sentence.' }] },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Jump first cue' }));
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'JUMP_TO_HERE', timeMs: 1_000 });
+    expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
+    expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Play from first cue' }));
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 1_000 });
+    expect(screen.queryByRole('dialog', { name: 'English learning assistant' })).not.toBeInTheDocument();
   });
 
   it('keeps every visible-DOM group cue current after playback updates', async () => {
@@ -284,7 +317,7 @@ describe('App history actions', () => {
     expect(screen.getByTestId('current-cues')).toHaveTextContent('visible-0,visible-1,visible-2');
   });
 
-  it('uses group start for active visible cues and cue start for inactive visible cues', async () => {
+  it('uses group range for active visible cues and cue range for inactive visible cues', async () => {
     const user = userEvent.setup();
     const query = vi.fn().mockResolvedValue([{ id: 42 }]);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
@@ -313,14 +346,16 @@ describe('App history actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Replay second cue' }));
     expect(sendMessage).toHaveBeenLastCalledWith(42, {
-      type: 'SEEK_TO_TIME',
-      timeMs: 10_000,
+      type: 'REPLAY_RANGE',
+      startMs: 10_000,
+      endMs: 14_000,
     });
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
     expect(sendMessage).toHaveBeenLastCalledWith(42, {
-      type: 'SEEK_TO_TIME',
-      timeMs: 2_000,
+      type: 'REPLAY_RANGE',
+      startMs: 2_000,
+      endMs: 6_000,
     });
   });
 
@@ -763,7 +798,7 @@ describe('App history actions', () => {
     const oldState = new Promise<ContentMessage>((resolve) => { resolveOldState = resolve; });
     const query = vi.fn().mockReturnValue(initialQuery);
     const sendMessage = vi.fn((tabId: number, message: { type: string }) => {
-      if (message.type === 'SEEK_TO_TIME') return Promise.resolve(undefined);
+      if (message.type === 'REPLAY_RANGE') return Promise.resolve(undefined);
       if (tabId === 1) return oldState;
       return Promise.resolve({
         type: 'CAPTIONS_UPDATED',
@@ -801,7 +836,7 @@ describe('App history actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(2, { type: 'SEEK_TO_TIME', timeMs: 1_000 });
+    expect(sendMessage).toHaveBeenCalledWith(2, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
   });
 
   it('binds an owned panel to its tab without querying or listening for activation', async () => {
@@ -842,7 +877,7 @@ describe('App history actions', () => {
     window.history.replaceState({}, '', '/?tabId=42');
     const query = vi.fn().mockResolvedValue([]);
     const sendMessage = vi.fn((tabId: number, message: { type: string }) => {
-      if (message.type === 'SEEK_TO_TIME') return Promise.resolve(undefined);
+      if (message.type === 'REPLAY_RANGE') return Promise.resolve(undefined);
       return Promise.resolve({
         type: 'CAPTIONS_UPDATED',
         videoId: 'owner-video',
@@ -861,7 +896,7 @@ describe('App history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
     expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' });
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'SEEK_TO_TIME', timeMs: 1_000 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
     expect(query).not.toHaveBeenCalled();
 
     unmount();

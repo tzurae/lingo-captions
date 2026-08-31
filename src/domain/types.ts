@@ -53,7 +53,9 @@ export type ContentMessage =
 
 export type SidePanelContentMessage =
   | { type: 'REQUEST_STATE' }
-  | { type: 'SEEK_TO_TIME'; timeMs: number };
+  | { type: 'JUMP_TO_HERE'; timeMs: number }
+  | { type: 'PLAY_FROM_HERE'; timeMs: number }
+  | { type: 'REPLAY_RANGE'; startMs: number; endMs: number };
 
 export type QueryIntentId =
   | 'translate_sentence'
