@@ -1,7 +1,14 @@
 import type { CaptionDiagnostic, ContentMessage, SidePanelContentMessage } from '../domain/types';
-import { parseCaptionTrack, type RawCaptionCue, type RawCaptionTrack } from './youtube-captions';
-import { createVisibleCaptionFallback, type VisibleCaptionFallback } from './visible-caption-fallback';
+import {
+  getCaptionTrackIdentity,
+  isEnglishTrack,
+  selectEnglishCaptionTrack,
+  type CaptionTrackCandidate,
+  type CaptionTrackProvenance,
+  type CaptionTrackSelectionReason,
+} from './caption-track-policy';
 import { createRenderedCaptionProgressMonitor, type RenderedCaptionProgressMonitor } from './rendered-caption-progress-monitor';
+import { parseCaptionTrack, type RawCaptionCue, type RawCaptionTrack } from './youtube-captions';
 
 type PlayerResponse = {
   videoDetails?: { videoId?: string };
@@ -12,10 +19,16 @@ type PlayerResponse = {
   };
 };
 
+type CaptionSelectionResponse = {
+  captionsEnabled: boolean;
+  activeTrack?: CaptionTrackCandidate;
+};
+
 type CorrelatedPlayerResponse = {
   videoId: string;
   requestVersion: number;
   playerResponse: PlayerResponse;
+  captionSelection: CaptionSelectionResponse;
 };
 
 const pageBridgeSource = 'youtube-english-learning';
@@ -26,27 +39,49 @@ const playerResponseRetryCount = 3;
 
 type CaptionTrackResponse = {
   baseUrl?: string;
+  kind?: string;
   languageCode?: string;
   name?: { simpleText?: string };
+  vssId?: string;
 };
 
 type CaptionResult =
-  | { type: 'track'; track: RawCaptionTrack }
-  | { type: 'no-captions'; reason: 'not-found' | 'not-english' | 'unsupported'; diagnostic: CaptionDiagnostic };
+  | {
+    type: 'track';
+    track: RawCaptionTrack;
+    trackId: string;
+    provenance: CaptionTrackProvenance;
+    selectionReason: CaptionTrackSelectionReason;
+  }
+  | { type: 'no-english-track'; diagnostic: CaptionDiagnostic }
+  | { type: 'retryable-error'; diagnostic: CaptionDiagnostic };
 
-type SynchronizableMessage = Extract<ContentMessage, { type: 'VIDEO_CHANGED' | 'CAPTIONS_UPDATED' | 'CAPTION_PROGRESS_UPDATED' | 'NO_CAPTIONS' | 'CAPTION_DIAGNOSTIC' }>;
+type SynchronizableMessage = Extract<ContentMessage, {
+  type:
+    | 'VIDEO_CHANGED'
+    | 'CAPTIONS_UPDATED'
+    | 'CAPTION_PROGRESS_UPDATED'
+    | 'CAPTION_LIFECYCLE_UPDATED'
+    | 'CAPTION_DIAGNOSTIC';
+}>;
 
 const playbackIntervalMs = 250;
+const adapterInstanceId = typeof globalThis.crypto?.randomUUID === 'function'
+  ? globalThis.crypto.randomUUID()
+  : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 let lastPlaybackMessageAt = Number.NEGATIVE_INFINITY;
 let activeVideo: HTMLVideoElement | null = null;
 let currentState: SynchronizableMessage[] = [];
-let visibleCaptionFallback: VisibleCaptionFallback | null = null;
 let renderedCaptionProgressMonitor: RenderedCaptionProgressMonitor | null = null;
 let replayEndMs: number | null = null;
 let synchronizationVersion = 0;
+let currentSynchronizationId: string | null = null;
+let lastKnownTrack: { videoId: string; trackId: string } | null = null;
+let observedCaptionSelectionKey: string | null = null;
+let captionSelectionProbeTimer: number | undefined;
 
 function sendMessage(message: ContentMessage): void {
-  const monitorAtSend = renderedCaptionProgressMonitor ?? visibleCaptionFallback;
+  const monitorAtSend = renderedCaptionProgressMonitor;
   try {
     const pending = chrome.runtime.sendMessage(message);
     void pending?.catch?.(() => monitorAtSend?.stop());
@@ -55,8 +90,12 @@ function sendMessage(message: ContentMessage): void {
   }
 }
 
-function diagnosticMessage(videoId: string, diagnostic: CaptionDiagnostic): SynchronizableMessage {
-  return { type: 'CAPTION_DIAGNOSTIC', videoId, diagnostic };
+function diagnosticMessage(
+  videoId: string,
+  synchronizationId: string,
+  diagnostic: CaptionDiagnostic,
+): SynchronizableMessage {
+  return { type: 'CAPTION_DIAGNOSTIC', videoId, synchronizationId, diagnostic };
 }
 
 function getVideoId(): string | null {
@@ -67,10 +106,6 @@ function getVideoTitle(): string {
   return document.querySelector('h1 yt-formatted-string')?.textContent?.trim() || document.title;
 }
 
-function isEnglishTrack(track: CaptionTrackResponse): boolean {
-  const language = (track.languageCode ?? track.name?.simpleText ?? '').trim().toLowerCase();
-  return language === 'english' || language === 'en' || language.startsWith('en-');
-}
 
 function extractJsonObject(source: string, startIndex: number): string | undefined {
   let depth = 0;
@@ -165,58 +200,167 @@ function requestPlayerResponse(videoId: string, requestVersion: number): void {
 function waitForPlayerResponse(
   videoId: string,
   requestVersion: number,
-  requestFirst: boolean,
-): Promise<PlayerResponse | undefined> {
+): Promise<CorrelatedPlayerResponse | undefined> {
   return new Promise((resolve) => {
     let attempts = 0;
-    let initialRequestSent = false;
-    const tryRead = () => {
+    let retryTimer: number | undefined;
+    let settled = false;
+    const finish = (response: CorrelatedPlayerResponse | undefined) => {
+      if (settled) return;
+      settled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      window.removeEventListener('message', receiveResponse);
+      resolve(response);
+    };
+    const receiveResponse = (event: MessageEvent<unknown>) => {
+      if (event.source !== window || !isPlayerResponseMessage(event.data)) return;
+      if (event.data.videoId !== videoId || event.data.requestVersion !== requestVersion) return;
+      finish(event.data);
+    };
+    const request = () => {
       if (getVideoId() !== videoId || requestVersion !== synchronizationVersion) {
-        resolve(undefined);
+        finish(undefined);
         return;
       }
-
-      if (requestFirst && !initialRequestSent) {
-        requestPlayerResponse(videoId, requestVersion);
-        initialRequestSent = true;
-      }
-
-      const response = getPlayerResponse(videoId);
-      if (response) {
-        resolve(response);
-        return;
-      }
-
-      if (!requestFirst || attempts > 0) {
-        requestPlayerResponse(videoId, requestVersion);
-      }
+      requestPlayerResponse(videoId, requestVersion);
       if (attempts >= playerResponseRetryCount) {
-        resolve(undefined);
+        const playerResponse = getPlayerResponse(videoId);
+        finish(playerResponse ? {
+          videoId,
+          requestVersion,
+          playerResponse,
+          captionSelection: {
+            captionsEnabled: document.querySelector('.ytp-subtitles-button')
+              ?.getAttribute('aria-pressed') === 'true',
+          },
+        } : undefined);
         return;
       }
-
       attempts += 1;
-      window.setTimeout(tryRead, playerResponseRetryDelayMs);
+      retryTimer = window.setTimeout(request, playerResponseRetryDelayMs);
     };
 
-    tryRead();
+    window.addEventListener('message', receiveResponse);
+    request();
   });
+}
+
+function hasOptionalStringFields(
+  value: Record<string, unknown>,
+  fields: string[],
+): boolean {
+  return fields.every((field) => value[field] === undefined || typeof value[field] === 'string');
+}
+
+function isCaptionTrackResponse(value: unknown): value is CaptionTrackResponse {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (!hasOptionalStringFields(candidate, ['baseUrl', 'kind', 'languageCode', 'vssId'])) return false;
+  if (candidate.name === undefined) return true;
+  if (typeof candidate.name !== 'object' || candidate.name === null || Array.isArray(candidate.name)) {
+    return false;
+  }
+  const name = candidate.name as Record<string, unknown>;
+  return name.simpleText === undefined || typeof name.simpleText === 'string';
+}
+
+function isActiveTrackResponse(value: unknown): value is CaptionTrackCandidate {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  return hasOptionalStringFields(
+    value as Record<string, unknown>,
+    ['baseUrl', 'kind', 'languageCode', 'name', 'vssId'],
+  );
+}
+
+function isPlayerResponsePayload(value: unknown, videoId: string): value is PlayerResponse {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  if (typeof response.videoDetails !== 'object'
+    || response.videoDetails === null
+    || Array.isArray(response.videoDetails)
+    || (response.videoDetails as Record<string, unknown>).videoId !== videoId) return false;
+  if (typeof response.captions !== 'object'
+    || response.captions === null
+    || Array.isArray(response.captions)) return false;
+  const captions = response.captions as Record<string, unknown>;
+  if (typeof captions.playerCaptionsTracklistRenderer !== 'object'
+    || captions.playerCaptionsTracklistRenderer === null
+    || Array.isArray(captions.playerCaptionsTracklistRenderer)) return false;
+  const tracks = (captions.playerCaptionsTracklistRenderer as Record<string, unknown>).captionTracks;
+  return Array.isArray(tracks) && tracks.every(isCaptionTrackResponse);
 }
 
 function isPlayerResponseMessage(message: unknown): message is CorrelatedPlayerResponse & {
   source: typeof pageBridgeSource;
   type: typeof playerResponseType;
 } {
-  if (typeof message !== 'object' || message === null) return false;
+  if (typeof message !== 'object' || message === null || Array.isArray(message)) return false;
   const candidate = message as Record<string, unknown>;
-  const response = candidate.playerResponse as PlayerResponse | undefined;
+  const videoId = candidate.videoId;
+  const selection = candidate.captionSelection;
+  if (typeof selection !== 'object' || selection === null || Array.isArray(selection)) return false;
+  const captionSelection = selection as Record<string, unknown>;
   return candidate.source === pageBridgeSource
     && candidate.type === playerResponseType
-    && typeof candidate.videoId === 'string'
+    && typeof videoId === 'string'
     && typeof candidate.requestVersion === 'number'
     && Number.isInteger(candidate.requestVersion)
     && candidate.requestVersion >= 0
-    && response?.videoDetails?.videoId === candidate.videoId;
+    && isPlayerResponsePayload(candidate.playerResponse, videoId)
+    && typeof captionSelection.captionsEnabled === 'boolean'
+    && (captionSelection.activeTrack === undefined
+      || isActiveTrackResponse(captionSelection.activeTrack));
+}
+
+function captionSelectionKey(selection: CaptionSelectionResponse): string {
+  const activeTrack = selection.activeTrack;
+  return JSON.stringify([
+    selection.captionsEnabled,
+    activeTrack?.vssId?.trim() ?? '',
+    activeTrack?.baseUrl?.trim() ?? '',
+    activeTrack?.languageCode?.trim().toLowerCase() ?? '',
+    activeTrack?.kind?.trim().toLowerCase() ?? '',
+    activeTrack?.name?.trim().toLowerCase() ?? '',
+  ]);
+}
+
+function handleCaptionSelectionResponse(event: MessageEvent<unknown>): void {
+  if (event.source !== window || !isPlayerResponseMessage(event.data)) return;
+  if (event.data.videoId !== getVideoId()
+    || event.data.requestVersion !== synchronizationVersion) return;
+  const nextSelectionKey = captionSelectionKey(event.data.captionSelection);
+  if (observedCaptionSelectionKey === null) {
+    observedCaptionSelectionKey = nextSelectionKey;
+    return;
+  }
+  if (nextSelectionKey === observedCaptionSelectionKey) return;
+  observedCaptionSelectionKey = nextSelectionKey;
+  void synchronizeVideo(false);
+}
+
+function scheduleCaptionSelectionProbe(): void {
+  if (captionSelectionProbeTimer !== undefined) {
+    window.clearTimeout(captionSelectionProbeTimer);
+  }
+  captionSelectionProbeTimer = window.setTimeout(() => {
+    captionSelectionProbeTimer = undefined;
+    const videoId = getVideoId();
+    if (!videoId || currentSynchronizationId === null) return;
+    requestPlayerResponse(videoId, synchronizationVersion);
+  }, 100);
+}
+
+function handleCaptionControlClick(event: MouseEvent): void {
+  if (!(event.target instanceof Element)) return;
+  if (event.target.closest('.ytp-subtitles-button, .ytp-menuitem')) {
+    scheduleCaptionSelectionProbe();
+  }
+}
+
+function handleCaptionShortcut(event: KeyboardEvent): void {
+  if (!event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'c') {
+    scheduleCaptionSelectionProbe();
+  }
 }
 
 function parseCaptionXml(xml: string): RawCaptionCue[] {
@@ -238,54 +382,124 @@ function parseCaptionXml(xml: string): RawCaptionCue[] {
   });
 }
 
-async function findEnglishCaptionTrack(response: PlayerResponse | undefined): Promise<CaptionResult> {
-  const tracks = response?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-
+async function findEnglishCaptionTrack(
+  response: PlayerResponse,
+  captionSelection: CaptionSelectionResponse,
+  lastKnownTrackId: string | null,
+): Promise<CaptionResult> {
+  const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!tracks?.length) {
     return {
-      type: 'no-captions',
-      reason: 'not-found',
-      diagnostic: response
-        ? { stage: 'caption-tracks', status: 'error', code: 'CAPTION_TRACKS_MISSING', message: '播放器資料中沒有字幕軌。' }
-        : { stage: 'player-response', status: 'error', code: 'PLAYER_RESPONSE_MISSING', message: '無法取得 YouTube 播放器資料。' },
-    };
-  }
-
-  const track = tracks.find(isEnglishTrack);
-  if (!track) {
-    return {
-      type: 'no-captions',
-      reason: 'not-english',
+      type: 'no-english-track',
       diagnostic: {
-        stage: 'english-track',
+        stage: 'caption-tracks',
         status: 'error',
-        code: 'ENGLISH_TRACK_MISSING',
-        message: '找到字幕軌，但沒有英文字幕軌。',
-        details: { trackCount: tracks.length, languages: tracks.map((item) => item.languageCode ?? item.name?.simpleText ?? 'unknown') },
+        code: 'CAPTION_TRACKS_MISSING',
+        message: '播放器資料中沒有英文字幕軌。',
+        details: { source: 'youtube-player', action: 'enable-english-cc-or-choose-another-video' },
       },
     };
   }
 
-  if (!track.baseUrl) {
+  const candidates = tracks.map((track): CaptionTrackCandidate => ({
+    baseUrl: track.baseUrl,
+    kind: track.kind,
+    languageCode: track.languageCode,
+    name: track.name?.simpleText,
+    vssId: track.vssId,
+  }));
+  if (captionSelection.captionsEnabled && !captionSelection.activeTrack) {
     return {
-      type: 'no-captions',
-      reason: 'unsupported',
-      diagnostic: { stage: 'timedtext-download', status: 'error', code: 'CAPTION_URL_MISSING', message: '英文字幕軌缺少可下載的字幕網址。' },
+      type: 'retryable-error',
+      diagnostic: {
+        stage: 'track-policy',
+        status: 'error',
+        code: 'ACTIVE_TRACK_MISSING',
+        message: 'YouTube 已開啟 CC，但目前 active Caption Track identity 尚未就緒。',
+        details: { source: 'youtube-player', action: 'retry' },
+      },
+    };
+  }
+
+  const selection = selectEnglishCaptionTrack(candidates, {
+    captionsEnabled: captionSelection.captionsEnabled,
+    activeTrack: captionSelection.activeTrack,
+    lastKnownTrackId,
+    lastKnownTrack: captionSelection.captionsEnabled ? null : captionSelection.activeTrack,
+  });
+
+  if (!selection) {
+    const activeTrack = captionSelection.activeTrack;
+    const hasActiveLanguageIdentity = Boolean(
+      activeTrack?.languageCode?.trim() || activeTrack?.vssId?.trim(),
+    );
+    const activeTrackIsUnresolvedEnglish = captionSelection.captionsEnabled
+      && activeTrack !== undefined
+      && (!hasActiveLanguageIdentity || isEnglishTrack(activeTrack));
+    if (activeTrackIsUnresolvedEnglish) {
+      return {
+        type: 'retryable-error',
+        diagnostic: {
+          stage: 'track-policy',
+          status: 'error',
+          code: 'ACTIVE_TRACK_UNRESOLVED',
+          message: 'YouTube active English Caption Track 尚無法唯一對應到播放器字幕軌。',
+          details: {
+            source: 'youtube-player',
+            action: 'retry',
+            ...(activeTrack?.languageCode ? { activeLanguage: activeTrack.languageCode } : {}),
+          },
+        },
+      };
+    }
+    const activeTrackIsNonEnglish = captionSelection.captionsEnabled && activeTrack !== undefined;
+    return {
+      type: 'no-english-track',
+      diagnostic: {
+        stage: activeTrackIsNonEnglish ? 'track-policy' : 'english-track',
+        status: 'error',
+        code: activeTrackIsNonEnglish ? 'ACTIVE_TRACK_NOT_ENGLISH' : 'ENGLISH_TRACK_MISSING',
+        message: activeTrackIsNonEnglish
+          ? 'YouTube 目前啟用的字幕軌不是可用的英文字幕軌。'
+          : '找到字幕軌，但沒有英文字幕軌。',
+        details: {
+          trackCount: tracks.length,
+          languages: tracks.map((track) => track.languageCode ?? track.name?.simpleText ?? 'unknown'),
+          source: 'youtube-player',
+          action: activeTrackIsNonEnglish
+            ? 'select-english-cc'
+            : 'enable-english-cc-or-choose-another-video',
+          ...(activeTrack?.languageCode ? { activeLanguage: activeTrack.languageCode } : {}),
+        },
+      },
+    };
+  }
+
+  const trackId = getCaptionTrackIdentity(selection.track);
+  if (!selection.track.baseUrl) {
+    return {
+      type: 'retryable-error',
+      diagnostic: {
+        stage: 'timedtext-download',
+        status: 'error',
+        code: 'CAPTION_URL_MISSING',
+        message: '選定的英文字幕軌缺少可下載網址。',
+        details: { source: 'youtube-player', action: 'retry' },
+      },
     };
   }
 
   try {
-    const response = await fetch(track.baseUrl);
+    const response = await fetch(selection.track.baseUrl);
     if (!response.ok) {
       return {
-        type: 'no-captions',
-        reason: 'unsupported',
+        type: 'retryable-error',
         diagnostic: {
           stage: 'timedtext-download',
           status: 'error',
           code: 'CAPTION_FETCH_FAILED',
-          message: `字幕下載失敗（HTTP ${response.status || 'unknown'}）。`,
-          details: { httpStatus: response.status || 0 },
+          message: `完整字幕下載失敗（HTTP ${response.status || 'unknown'}）。`,
+          details: { httpStatus: response.status || 0, source: 'timedtext', action: 'retry' },
         },
       };
     }
@@ -293,28 +507,36 @@ async function findEnglishCaptionTrack(response: PlayerResponse | undefined): Pr
     const cues = parseCaptionXml(await response.text());
     if (!cues.length) {
       return {
-        type: 'no-captions',
-        reason: 'unsupported',
-        diagnostic: { stage: 'timedtext-parse', status: 'error', code: 'CAPTION_PARSE_EMPTY', message: '字幕檔下載成功，但解析不到任何字幕內容。' },
+        type: 'retryable-error',
+        diagnostic: {
+          stage: 'timedtext-parse',
+          status: 'error',
+          code: 'CAPTION_PARSE_EMPTY',
+          message: '字幕檔下載成功，但完整內容為空。',
+          details: { source: 'timedtext', action: 'retry' },
+        },
       };
     }
 
     return {
       type: 'track',
       track: {
-        language: track.languageCode ?? track.name?.simpleText ?? 'English',
+        language: selection.track.languageCode ?? selection.track.name ?? 'English',
         cues,
       },
+      trackId,
+      provenance: selection.provenance,
+      selectionReason: selection.reason,
     };
   } catch (reason) {
     return {
-      type: 'no-captions',
-      reason: 'unsupported',
+      type: 'retryable-error',
       diagnostic: {
         stage: 'timedtext-download',
         status: 'error',
         code: 'CAPTION_FETCH_EXCEPTION',
-        message: `字幕下載發生錯誤：${reason instanceof Error ? reason.message : '未知錯誤'}`,
+        message: `完整字幕下載發生錯誤：${reason instanceof Error ? reason.message : '未知錯誤'}`,
+        details: { source: 'timedtext', action: 'retry' },
       },
     };
   }
@@ -326,8 +548,19 @@ function broadcastState(message: SynchronizableMessage): void {
 
 function isSidePanelContentMessage(message: unknown): message is SidePanelContentMessage {
   if (typeof message !== 'object' || message === null) return false;
-  const candidate = message as { type?: unknown; timeMs?: unknown; startMs?: unknown; endMs?: unknown };
-  if (candidate.type === 'REQUEST_STATE'
+  const candidate = message as {
+    type?: unknown;
+    videoId?: unknown;
+    synchronizationId?: unknown;
+    timeMs?: unknown;
+    startMs?: unknown;
+    endMs?: unknown;
+  };
+  if (candidate.type === 'REQUEST_STATE') return true;
+  if (typeof candidate.videoId !== 'string' || typeof candidate.synchronizationId !== 'string') {
+    return false;
+  }
+  if (candidate.type === 'RETRY_CAPTIONS'
     || candidate.type === 'PAUSE_PLAYBACK'
     || candidate.type === 'RESUME_PLAYBACK') return true;
   if ((candidate.type === 'JUMP_TO_HERE' || candidate.type === 'PLAY_FROM_HERE')
@@ -397,12 +630,17 @@ function isRequestStateMessage(message: SidePanelContentMessage): message is Ext
 function sendCurrentPlayback(): void {
   const videoId = getVideoId();
   const video = document.querySelector('video') ?? activeVideo;
-  if (!videoId || !video) {
+  if (!videoId || !video || !currentSynchronizationId) {
     return;
   }
 
   bindPlayback(video);
-  sendMessage({ type: 'PLAYBACK_UPDATED', videoId, currentTimeMs: Math.round(video.currentTime * 1000) });
+  sendMessage({
+    type: 'PLAYBACK_UPDATED',
+    videoId,
+    synchronizationId: currentSynchronizationId,
+    currentTimeMs: Math.round(video.currentTime * 1000),
+  });
 }
 
 function bindPlayback(video: HTMLVideoElement): void {
@@ -415,100 +653,42 @@ function bindPlayback(video: HTMLVideoElement): void {
   video.addEventListener('timeupdate', () => {
     if (video !== activeVideo) return;
     const videoId = getVideoId();
-    if (!videoId) return;
+    const synchronizationId = currentSynchronizationId;
+    if (!videoId || !synchronizationId) return;
     const currentTimeMs = Math.round(video.currentTime * 1000);
     if (replayEndMs !== null && currentTimeMs >= replayEndMs) {
       const completedReplayEndMs = replayEndMs;
       replayEndMs = null;
       video.currentTime = completedReplayEndMs / 1000;
       video.pause();
-      sendMessage({ type: 'PLAYBACK_UPDATED', videoId, currentTimeMs: completedReplayEndMs });
+      sendMessage({ type: 'PLAYBACK_UPDATED', videoId, synchronizationId, currentTimeMs: completedReplayEndMs });
       return;
     }
     const now = Date.now();
     if (now - lastPlaybackMessageAt < playbackIntervalMs) return;
     lastPlaybackMessageAt = now;
-    sendMessage({ type: 'PLAYBACK_UPDATED', videoId, currentTimeMs });
+    sendMessage({ type: 'PLAYBACK_UPDATED', videoId, synchronizationId, currentTimeMs });
   });
 }
 
-function startVisibleCaptionFallback(
-  videoId: string,
-  videoChangedMessage: SynchronizableMessage,
-  failureDiagnostic: SynchronizableMessage,
-  version: number,
-): boolean {
-  visibleCaptionFallback?.stop();
-  renderedCaptionProgressMonitor?.stop();
-  renderedCaptionProgressMonitor = null;
-  const fallbackDiagnostic = diagnosticMessage(videoId, {
-    stage: 'visible-dom',
-    status: 'fallback',
-    code: 'VISIBLE_DOM_FALLBACK_ACTIVE',
-    message: '完整字幕抓取失敗，改為讀取 YouTube 畫面上實際顯示的字幕。',
-  });
-  broadcastState(failureDiagnostic);
-  broadcastState(fallbackDiagnostic);
-
-  let captured = false;
-  visibleCaptionFallback = createVisibleCaptionFallback({
-    document,
-    getCurrentTimeMs: () => Math.round((document.querySelector('video')?.currentTime ?? 0) * 1000),
-    onSnapshotChanged: ({ cues, activeGroup }) => {
-      if (version !== synchronizationVersion || getVideoId() !== videoId) {
-        return;
-      }
-      captured = true;
-      const readyDiagnostic = diagnosticMessage(videoId, {
-        stage: 'ready',
-        status: 'success',
-        message: `已從畫面字幕取得 ${cues.length} 句。`,
-        details: { cueCount: cues.length, source: 'visible-dom' },
-      });
-      const captionsUpdatedMessage: SynchronizableMessage = {
-        type: 'CAPTIONS_UPDATED',
-        videoId,
-        videoTitle: getVideoTitle(),
-        videoUrl: window.location.href,
-        track: {
-          language: 'en-visible',
-          isEnglish: true,
-          source: 'visible-dom',
-          cues,
-          ...(activeGroup ? { activeGroup } : {}),
-        },
-      };
-      currentState = [videoChangedMessage, fallbackDiagnostic, readyDiagnostic, captionsUpdatedMessage];
-      broadcastState(readyDiagnostic);
-      broadcastState(captionsUpdatedMessage);
-    },
-  });
-  visibleCaptionFallback.start();
-  if (!captured) {
-    currentState = [videoChangedMessage, failureDiagnostic, fallbackDiagnostic];
-  }
-  const capturedProgress = startRenderedCaptionProgressMonitor(videoId, version, true);
-  return captured || capturedProgress;
-}
 
 function startRenderedCaptionProgressMonitor(
   videoId: string,
+  synchronizationId: string,
   version: number,
-  preserveVisibleFallback = false,
 ): boolean {
-  if (!preserveVisibleFallback) {
-    visibleCaptionFallback?.stop();
-    visibleCaptionFallback = null;
-  }
   renderedCaptionProgressMonitor?.stop();
   renderedCaptionProgressMonitor = createRenderedCaptionProgressMonitor({
     document,
     getCurrentTimeMs: () => Math.round((document.querySelector('video')?.currentTime ?? 0) * 1000),
     onProgressChanged: (progress) => {
-      if (version !== synchronizationVersion || getVideoId() !== videoId) return;
+      if (version !== synchronizationVersion
+        || synchronizationId !== currentSynchronizationId
+        || getVideoId() !== videoId) return;
       const progressMessage: SynchronizableMessage = {
         type: 'CAPTION_PROGRESS_UPDATED',
         videoId,
+        synchronizationId,
         progress,
       };
       currentState = [
@@ -521,68 +701,129 @@ function startRenderedCaptionProgressMonitor(
   return renderedCaptionProgressMonitor.start();
 }
 
-async function synchronizeVideo(
-  sendPlaybackAfter = false,
-  requestPlayerResponseFirst = false,
-  suppliedPlayerResponse?: PlayerResponse,
-): Promise<void> {
+function retainCurrentProgress(
+  videoChangedMessage: SynchronizableMessage,
+  messages: SynchronizableMessage[],
+): void {
+  const progress = currentState.find((message) => message.type === 'CAPTION_PROGRESS_UPDATED');
+  currentState = [videoChangedMessage, ...messages, ...(progress ? [progress] : [])];
+}
+
+async function synchronizeVideo(sendPlaybackAfter = false): Promise<void> {
   const videoId = getVideoId();
   if (!videoId) {
+    synchronizationVersion += 1;
+    currentSynchronizationId = null;
+    observedCaptionSelectionKey = null;
+    currentState = [];
+    renderedCaptionProgressMonitor?.stop();
+    renderedCaptionProgressMonitor = null;
     return;
   }
   const version = ++synchronizationVersion;
-  visibleCaptionFallback?.stop();
-  visibleCaptionFallback = null;
+  const synchronizationId = `${adapterInstanceId}:${version}`;
+  currentSynchronizationId = synchronizationId;
+  observedCaptionSelectionKey = null;
+  if (lastKnownTrack?.videoId !== videoId) lastKnownTrack = null;
   renderedCaptionProgressMonitor?.stop();
   renderedCaptionProgressMonitor = null;
 
   lastPlaybackMessageAt = Number.NEGATIVE_INFINITY;
   const video = document.querySelector('video');
-  if (video) {
-    bindPlayback(video);
-  }
+  if (video) bindPlayback(video);
 
   const videoChangedMessage: SynchronizableMessage = {
     type: 'VIDEO_CHANGED',
     videoId,
+    synchronizationId,
     videoTitle: getVideoTitle(),
     videoUrl: window.location.href,
   };
-  currentState = [videoChangedMessage];
-  broadcastState(videoChangedMessage);
-
-  const loadingDiagnostic = diagnosticMessage(videoId, {
+  const loadingLifecycle: SynchronizableMessage = {
+    type: 'CAPTION_LIFECYCLE_UPDATED',
+    videoId,
+    synchronizationId,
+    lifecycle: {
+      status: 'loading',
+      message: '正在載入完整英文字幕…',
+    },
+  };
+  const loadingDiagnostic = diagnosticMessage(videoId, synchronizationId, {
     stage: 'player-response',
     status: 'running',
-    message: '正在讀取 YouTube 播放器與字幕資料。',
+    message: '正在讀取 YouTube 播放器、字幕軌與目前 CC 狀態。',
   });
-  currentState.push(loadingDiagnostic);
+  currentState = [videoChangedMessage, loadingDiagnostic, loadingLifecycle];
+  broadcastState(videoChangedMessage);
   broadcastState(loadingDiagnostic);
+  broadcastState(loadingLifecycle);
+  startRenderedCaptionProgressMonitor(videoId, synchronizationId, version);
 
-  const playerResponse = hasExactVideoId(suppliedPlayerResponse, videoId)
-    ? suppliedPlayerResponse
-    : await waitForPlayerResponse(videoId, version, requestPlayerResponseFirst);
-  if (version !== synchronizationVersion || getVideoId() !== videoId) {
+  const correlatedResponse = await waitForPlayerResponse(videoId, version);
+  if (version !== synchronizationVersion
+    || synchronizationId !== currentSynchronizationId
+    || getVideoId() !== videoId) return;
+
+  if (!correlatedResponse) {
+    const diagnostic = diagnosticMessage(videoId, synchronizationId, {
+      stage: 'player-response',
+      status: 'error',
+      code: 'PLAYER_RESPONSE_MISSING',
+      message: '無法取得目前影片的 YouTube 播放器資料。',
+      details: { source: 'youtube-player', action: 'retry' },
+    });
+    const lifecycle: SynchronizableMessage = {
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId,
+      synchronizationId,
+      lifecycle: {
+        status: 'retryable-error',
+        code: 'PLAYER_RESPONSE_MISSING',
+        message: '完整英文字幕尚未載入；請重試。',
+        action: 'retry',
+      },
+    };
+    observedCaptionSelectionKey = 'unavailable';
+    retainCurrentProgress(videoChangedMessage, [diagnostic, lifecycle]);
+    broadcastState(diagnostic);
+    broadcastState(lifecycle);
+    if (sendPlaybackAfter) sendCurrentPlayback();
     return;
   }
-  const result = await findEnglishCaptionTrack(playerResponse);
-  if (version !== synchronizationVersion || getVideoId() !== videoId) {
-    return;
-  }
+  observedCaptionSelectionKey = captionSelectionKey(correlatedResponse.captionSelection);
 
-  if (result.type === 'no-captions') {
-    const failureDiagnostic = diagnosticMessage(videoId, result.diagnostic);
-    const capturedVisibleCaption = startVisibleCaptionFallback(videoId, videoChangedMessage, failureDiagnostic, version);
-    if (capturedVisibleCaption) {
-      if (sendPlaybackAfter) sendCurrentPlayback();
-      return;
-    }
-    const noCaptionsMessage: SynchronizableMessage = { type: 'NO_CAPTIONS', videoId, reason: result.reason };
-    currentState = [videoChangedMessage, failureDiagnostic, noCaptionsMessage];
-    broadcastState(noCaptionsMessage);
-    if (sendPlaybackAfter) {
-      sendCurrentPlayback();
-    }
+  const result = await findEnglishCaptionTrack(
+    correlatedResponse.playerResponse,
+    correlatedResponse.captionSelection,
+    lastKnownTrack?.trackId ?? null,
+  );
+  if (version !== synchronizationVersion
+    || synchronizationId !== currentSynchronizationId
+    || getVideoId() !== videoId) return;
+
+  if (result.type !== 'track') {
+    const diagnostic = diagnosticMessage(videoId, synchronizationId, result.diagnostic);
+    const lifecycle: SynchronizableMessage = {
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId,
+      synchronizationId,
+      lifecycle: result.type === 'no-english-track'
+        ? {
+          status: 'no-english-track',
+          message: '這部影片目前沒有可用的英文字幕軌。',
+          action: 'enable-english-cc',
+        }
+        : {
+          status: 'retryable-error',
+          code: result.diagnostic.code ?? 'CAPTION_ACQUISITION_FAILED',
+          message: '完整英文字幕下載或解析失敗；未建立部分 Transcript。',
+          action: 'retry',
+        },
+    };
+    retainCurrentProgress(videoChangedMessage, [diagnostic, lifecycle]);
+    broadcastState(diagnostic);
+    broadcastState(lifecycle);
+    if (sendPlaybackAfter) sendCurrentPlayback();
     return;
   }
 
@@ -590,45 +831,92 @@ async function synchronizeVideo(
     const captionsUpdatedMessage: SynchronizableMessage = {
       type: 'CAPTIONS_UPDATED',
       videoId,
+      synchronizationId,
       videoTitle: getVideoTitle(),
       videoUrl: window.location.href,
       track: parseCaptionTrack(result.track),
+      lifecycle: {
+        status: 'ready',
+        message: '完整英文字幕已就緒。',
+      },
     };
-    const readyDiagnostic = diagnosticMessage(videoId, {
+    const policyDiagnostic = diagnosticMessage(videoId, synchronizationId, {
+      stage: 'track-policy',
+      status: 'success',
+      message: `已選定 ${result.provenance === 'creator' ? 'creator-provided' : 'automatic'} English Caption Track。`,
+      details: {
+        source: result.provenance,
+        selection: result.selectionReason,
+        trackId: result.trackId,
+        action: 'none',
+      },
+    });
+    const readyDiagnostic = diagnosticMessage(videoId, synchronizationId, {
       stage: 'ready',
       status: 'success',
       message: `已取得完整英文字幕，共 ${captionsUpdatedMessage.track.cues.length} 句。`,
-      details: { cueCount: captionsUpdatedMessage.track.cues.length, source: 'timedtext' },
+      details: {
+        cueCount: captionsUpdatedMessage.track.cues.length,
+        source: 'timedtext',
+        provenance: result.provenance,
+      },
     });
-    currentState = [videoChangedMessage, readyDiagnostic, captionsUpdatedMessage];
+    if (result.selectionReason === 'active' || result.selectionReason === 'last-known') {
+      lastKnownTrack = { videoId, trackId: result.trackId };
+    }
+    retainCurrentProgress(videoChangedMessage, [
+      policyDiagnostic,
+      readyDiagnostic,
+      captionsUpdatedMessage,
+    ]);
+    broadcastState(policyDiagnostic);
     broadcastState(readyDiagnostic);
     broadcastState(captionsUpdatedMessage);
-    startRenderedCaptionProgressMonitor(videoId, version);
-    if (sendPlaybackAfter) {
-      sendCurrentPlayback();
-    }
-  } catch {
-    const noCaptionsMessage: SynchronizableMessage = { type: 'NO_CAPTIONS', videoId, reason: 'unsupported' };
-    currentState = [videoChangedMessage, noCaptionsMessage];
-    broadcastState(noCaptionsMessage);
-    if (sendPlaybackAfter) {
-      sendCurrentPlayback();
-    }
+    if (sendPlaybackAfter) sendCurrentPlayback();
+  } catch (reason) {
+    const diagnostic = diagnosticMessage(videoId, synchronizationId, {
+      stage: 'timedtext-parse',
+      status: 'error',
+      code: 'CAPTION_NORMALIZATION_FAILED',
+      message: `完整字幕正規化失敗：${reason instanceof Error ? reason.message : '未知錯誤'}`,
+      details: { source: 'timedtext', action: 'retry' },
+    });
+    const lifecycle: SynchronizableMessage = {
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId,
+      synchronizationId,
+      lifecycle: {
+        status: 'retryable-error',
+        code: 'CAPTION_NORMALIZATION_FAILED',
+        message: '完整英文字幕無法建立；未建立部分 Transcript。',
+        action: 'retry',
+      },
+    };
+    retainCurrentProgress(videoChangedMessage, [diagnostic, lifecycle]);
+    broadcastState(diagnostic);
+    broadcastState(lifecycle);
+    if (sendPlaybackAfter) sendCurrentPlayback();
   }
 }
 
-window.addEventListener('message', (event: MessageEvent<unknown>) => {
-  if (event.source !== window || !isPlayerResponseMessage(event.data)) {
-    return;
-  }
-  if (getVideoId() !== event.data.videoId) return;
-  if (event.data.requestVersion !== synchronizationVersion) return;
-  void synchronizeVideo(false, false, event.data.playerResponse);
-});
+window.addEventListener('message', handleCaptionSelectionResponse);
+document.addEventListener('click', handleCaptionControlClick);
+document.addEventListener('keydown', handleCaptionShortcut);
 
 if (typeof chrome !== 'undefined') {
   chrome.runtime.onMessage.addListener((message: unknown) => {
-    if (!isSidePanelContentMessage(message)) {
+    if (!isSidePanelContentMessage(message)) return;
+    if (isRequestStateMessage(message)) {
+      const videoId = getVideoId();
+      if (!videoId || currentState[0]?.videoId !== videoId) return;
+      currentState.forEach(broadcastState);
+      sendCurrentPlayback();
+      return;
+    }
+    if (message.videoId !== getVideoId()
+      || message.synchronizationId !== currentSynchronizationId) return;
+    if (message.type === 'RETRY_CAPTIONS') {
+      void synchronizeVideo(true);
       return;
     }
     if (message.type === 'PAUSE_PLAYBACK') {
@@ -647,26 +935,13 @@ if (typeof chrome !== 'undefined') {
       playFromHere(message.timeMs);
       return;
     }
-    if (message.type === 'REPLAY_RANGE') {
-      replayRange(message.startMs, message.endMs);
-      return;
-    }
-
-    const videoId = getVideoId();
-    if (!videoId) return;
-    if (currentState.length && currentState[0].videoId === videoId) {
-      currentState.forEach(broadcastState);
-      sendCurrentPlayback();
-    }
-    void synchronizeVideo(true, true);
+    replayRange(message.startMs, message.endMs);
   });
 }
 
 document.addEventListener('yt-navigate-finish', () => {
   replayEndMs = null;
-  visibleCaptionFallback?.stop();
-  visibleCaptionFallback = null;
-  void synchronizeVideo(false, true);
+  void synchronizeVideo(false);
 });
 
-void synchronizeVideo(false, true);
+void synchronizeVideo(false);

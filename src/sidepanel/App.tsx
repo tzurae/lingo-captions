@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import type { ActiveCaptionGroup, CaptionCue, CaptionDiagnostic, CaptionTrack, ContentMessage, PublicSettings, QueryIntentId, QueryRequest, QueryResult as QueryResultValue, RenderedCaptionProgress } from '../domain/types';
+import type { CaptionCue, CaptionDiagnostic, CaptionLifecycle, CaptionTrack, ContentMessage, PublicSettings, QueryIntentId, QueryRequest, QueryResult as QueryResultValue, RenderedCaptionProgress } from '../domain/types';
 import { buildQueryContext } from '../domain/context-builder';
 import { projectLearningTranscriptExperience } from '../domain/learning-transcript-experience';
 import {
@@ -38,27 +38,6 @@ const publicDefaultSettings: PublicSettings = {
   apiKeyLastFour: null,
 };
 
-function sanitizeActiveGroup(track: CaptionTrack): ActiveCaptionGroup | undefined {
-  if (track.source !== 'visible-dom' || !track.activeGroup) return undefined;
-  const validIds = new Set(track.cues.map((cue) => cue.id));
-  const cueOrder = new Map(track.cues.map((cue, index) => [cue.id, index]));
-  const seen = new Set<string>();
-  const cueIds = track.activeGroup.cueIds.filter((id) => {
-    if (!validIds.has(id) || seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
-  const positions = cueIds.map((id) => cueOrder.get(id)!);
-  const contiguous = positions.every((position, index) => (
-    index === 0 || position === positions[index - 1] + 1
-  ));
-  return cueIds.length > 0
-    && contiguous
-    && Number.isFinite(track.activeGroup.startMs)
-    ? { cueIds, startMs: Math.max(0, track.activeGroup.startMs) }
-    : undefined;
-}
-
 export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const [ownerTabId] = useState(() => readOwnerTabId(window.location.search));
   const [tab, setTab] = useState<Tab>('transcript');
@@ -73,9 +52,13 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const [isFavorite, setIsFavorite] = useState(false);
   const [historyWarning, setHistoryWarning] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [refreshing, setRefreshing] = useState(false);
+  const [captionLifecycle, setCaptionLifecycle] = useState<CaptionLifecycle>({
+    status: 'retryable-error',
+    code: 'YOUTUBE_TAB_REQUIRED',
+    message: 'Open an available YouTube tab to load captions.',
+    action: 'retry',
+  });
   const [diagnostics, setDiagnostics] = useState<CaptionDiagnostic[]>([]);
-  const [error, setError] = useState<string | null>('Open an available YouTube tab to load captions.');
   const [queryError, setQueryError] = useState<string | null>(null);
   const [settings, setSettings] = useState<PublicSettings>(publicDefaultSettings);
   const [activeQueryConfig, setActiveQueryConfig] = useState<ActiveQueryConfig | null>(null);
@@ -177,10 +160,10 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const displayedDiagnostics = useMemo<CaptionDiagnostic[]>(() => {
     if (!transcriptExperience.alignmentFailure) return diagnostics;
     return [
-      ...diagnostics.filter((diagnostic) => diagnostic.stage !== 'visible-dom'),
+      ...diagnostics.filter((diagnostic) => diagnostic.stage !== 'caption-progress'),
       {
-        stage: 'visible-dom',
-        status: 'fallback',
+        stage: 'caption-progress',
+        status: 'error',
         code: 'CAPTION_PROGRESS_ALIGNMENT_FAILED',
         message: 'YouTube 畫面字幕無法對齊完整字幕，已改用完整目前句子。',
         details: {
@@ -191,9 +174,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
       },
     ];
   }, [diagnostics, transcriptExperience.alignmentFailure]);
-  const captionSource = captionTrack?.source ?? null;
-  const activeGroup = captionTrack?.activeGroup;
-  const selectedVideoIdRef = useRef<string | null>(null);
+  const currentSynchronizationRef = useRef<{ videoId: string; synchronizationId: string } | null>(null);
   const activeTabIdRef = useRef<number | undefined>(undefined);
   const queryRequestTokenRef = useRef(0);
   const invalidatedContextReloadedRef = useRef(false);
@@ -203,20 +184,9 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const focusRequestVersionRef = useRef(0);
 
   function replayRangeForCue(cue: CaptionCue | StudySentence): ReplayRange {
-    const sourceCueIds = new Set('sourceCueIds' in cue ? cue.sourceCueIds : [cue.id]);
-    const belongsToVisibleGroup = captionSource === 'visible-dom'
-      && activeGroup?.cueIds.some((id) => sourceCueIds.has(id));
-    const startMs = belongsToVisibleGroup ? activeGroup?.startMs ?? cue.startMs : cue.startMs;
-    const activeCueIds = new Set(belongsToVisibleGroup ? activeGroup?.cueIds : []);
-    const endMs = belongsToVisibleGroup
-      ? captionTrack?.cues
-        .filter((candidate) => activeCueIds.has(candidate.id))
-        .reduce((latestEndMs, candidate) => Math.max(latestEndMs, candidate.endMs), cue.endMs)
-        ?? cue.endMs
-      : cue.endMs;
     return {
-      startMs: Math.max(0, startMs),
-      endMs: Math.max(startMs + 1, endMs),
+      startMs: Math.max(0, cue.startMs),
+      endMs: Math.max(cue.startMs + 1, cue.endMs),
     };
   }
 
@@ -224,16 +194,17 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     if (!intent) return;
     const activeTabId = ownerTabId ?? activeTabIdRef.current;
     const tabs = typeof chrome !== 'undefined' ? chrome.tabs : undefined;
-    if (activeTabId === undefined || !tabs) return;
+    const identity = currentSynchronizationRef.current;
+    if (activeTabId === undefined || !tabs || !identity) return;
     if (intent.type === 'pause') {
-      void tabs.sendMessage(activeTabId, { type: 'PAUSE_PLAYBACK' });
+      void tabs.sendMessage(activeTabId, { type: 'PAUSE_PLAYBACK', ...identity });
       return;
     }
     if (intent.type === 'resume') {
-      void tabs.sendMessage(activeTabId, { type: 'RESUME_PLAYBACK' });
+      void tabs.sendMessage(activeTabId, { type: 'RESUME_PLAYBACK', ...identity });
       return;
     }
-    void tabs.sendMessage(activeTabId, { type: 'PLAY_FROM_HERE', timeMs: intent.timeMs });
+    void tabs.sendMessage(activeTabId, { type: 'PLAY_FROM_HERE', ...identity, timeMs: intent.timeMs });
   }
 
   function continuousRowIdForStudySentence(studySentenceId: string): string {
@@ -370,52 +341,49 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
 
   useEffect(() => {
     const listener = (message: ContentMessage, sender?: chrome.runtime.MessageSender) => {
+      if (typeof message.synchronizationId !== 'string' || message.synchronizationId.length === 0) return;
       const senderTabId = sender?.tab?.id;
-      if (activeTabIdRef.current !== undefined && senderTabId !== undefined && senderTabId !== activeTabIdRef.current) {
-        return;
-      }
-      if (selectedVideoIdRef.current === null) {
-        if (message.type === 'PLAYBACK_UPDATED' || message.type === 'CAPTION_PROGRESS_UPDATED') {
-          return;
-        }
-        selectedVideoIdRef.current = message.videoId;
-      } else if (message.videoId !== selectedVideoIdRef.current) {
+      if (activeTabIdRef.current !== undefined
+        && senderTabId !== undefined
+        && senderTabId !== activeTabIdRef.current) return;
+
+      const incomingIdentity = {
+        videoId: message.videoId,
+        synchronizationId: message.synchronizationId,
+      };
+      const currentIdentity = currentSynchronizationRef.current;
+      if (currentIdentity === null) {
+        if (message.type === 'PLAYBACK_UPDATED'
+          || message.type === 'CAPTION_PROGRESS_UPDATED'
+          || message.type === 'CAPTION_DIAGNOSTIC') return;
+        currentSynchronizationRef.current = incomingIdentity;
+      } else if (currentIdentity.videoId !== message.videoId
+        || currentIdentity.synchronizationId !== message.synchronizationId) {
         const isActiveTabNavigation = message.type === 'VIDEO_CHANGED'
           && activeTabIdRef.current !== undefined
           && senderTabId === activeTabIdRef.current;
         if (!isActiveTabNavigation) return;
-        selectedVideoIdRef.current = message.videoId;
+        currentSynchronizationRef.current = incomingIdentity;
       }
 
       if (message.type === 'CAPTIONS_UPDATED') {
         setCaptionTrack({
           ...message.track,
           cues: [...message.track.cues].sort((left, right) => left.startMs - right.startMs),
-          activeGroup: sanitizeActiveGroup(message.track),
         });
-        setRenderedProgress((current) => message.track.source === 'timedtext' ? null : current);
+        setRenderedProgress(null);
         setVideo({ id: message.videoId, title: message.videoTitle, url: message.videoUrl });
-        setError(null);
-        setRefreshing(false);
+        setCaptionLifecycle(message.lifecycle);
+        setDiagnostics((current) => current.filter((entry) => entry.status !== 'running'));
       }
       if (message.type === 'CAPTION_PROGRESS_UPDATED') {
         setRenderedProgress(message.progress);
-        setCaptionTrack((current) => {
-          if (current || !message.progress.activeGroup || message.progress.cues.length === 0) return current;
-          return {
-            language: 'en-visible',
-            isEnglish: true,
-            source: 'visible-dom',
-            cues: message.progress.cues,
-            activeGroup: message.progress.activeGroup,
-          };
-        });
       }
       if (message.type === 'CAPTION_DIAGNOSTIC') {
-        setDiagnostics((current) => [...current.filter((entry) => entry.stage !== message.diagnostic.stage), message.diagnostic]);
-        if (message.diagnostic.status === 'error') {
-          setError(message.diagnostic.message);
-        }
+        setDiagnostics((current) => [
+          ...current.filter((entry) => entry.stage !== message.diagnostic.stage),
+          message.diagnostic,
+        ]);
       }
       if (message.type === 'PLAYBACK_UPDATED') {
         setPlaybackMs(message.currentTimeMs);
@@ -428,19 +396,16 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         clearAssistant();
         resetTranscriptSession();
         setDiagnostics([]);
+        setCaptionLifecycle({ status: 'loading', message: '正在載入完整英文字幕…' });
       }
-      if (message.type === 'NO_CAPTIONS') {
+      if (message.type === 'CAPTION_LIFECYCLE_UPDATED') {
+        setCaptionLifecycle(message.lifecycle);
         setCaptionTrack(null);
-        setRenderedProgress(null);
-        setPlaybackMs(null);
-        clearAssistant();
-        resetTranscriptSession();
-        setError(message.reason === 'not-english'
-          ? 'YouTube 有字幕，但沒有英文字幕軌。'
-          : message.reason === 'unsupported'
-            ? '找到英文字幕軌，但字幕下載或解析失敗；請查看字幕診斷。'
-            : '尚未取得完整字幕或畫面字幕；請確認 YouTube 的 CC 已開啟。');
-        setRefreshing(false);
+        if (message.lifecycle.status !== 'loading') {
+          setDiagnostics((current) => current.filter((entry) => entry.status !== 'running'));
+          clearAssistant();
+          resetTranscriptSession();
+        }
       }
     };
     runtimeMessageListenerRef.current = listener;
@@ -454,13 +419,19 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
           stage: 'player-response',
           status: 'error',
           code: 'EXTENSION_CONNECTION_FAILED',
-          message: '請在 YouTube 分頁按 Ctrl+Shift+R，再重新抓取字幕。',
+          message: '請在 YouTube 分頁按 Ctrl+Shift+R，再重試完整字幕。',
+          details: { source: 'extension-content-script', action: 'retry' },
         };
         setDiagnostics([diagnostic]);
-        setError('無法連線到 YouTube 字幕腳本；目前分頁可能仍在使用舊版 extension。');
+        setCaptionLifecycle({
+          status: 'retryable-error',
+          code: 'EXTENSION_CONNECTION_FAILED',
+          message: '無法連線到 YouTube 字幕腳本；請重新整理影片分頁後重試。',
+          action: 'retry',
+        });
       };
       const resetActiveTabState = () => {
-        selectedVideoIdRef.current = null;
+        currentSynchronizationRef.current = null;
         setCaptionTrack(null);
         setRenderedProgress(null);
         setPlaybackMs(null);
@@ -468,8 +439,12 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         clearAssistant();
         resetTranscriptSession();
         setDiagnostics([]);
-        setError(null);
-        setRefreshing(false);
+        setCaptionLifecycle({
+          status: 'retryable-error',
+          code: 'YOUTUBE_TAB_REQUIRED',
+          message: 'Open an available YouTube tab to load captions.',
+          action: 'retry',
+        });
       };
       const requestTabState = async (tabId: number, requestToken: number) => {
         if (requestToken !== activeTabRequestToken) return;
@@ -518,15 +493,23 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   }, []);
 
   async function refreshTranscript(): Promise<void> {
-    setRefreshing(true);
-    setError(null);
+    setCaptionTrack(null);
+    setRenderedProgress(null);
+    setPlaybackMs(null);
+    clearAssistant();
+    resetTranscriptSession();
     setDiagnostics([]);
+    setCaptionLifecycle({ status: 'loading', message: '正在載入完整英文字幕…' });
     try {
       const tabs = typeof chrome !== 'undefined' ? chrome.tabs : undefined;
       if (!tabs) throw new Error('目前沒有可用的 YouTube 分頁。');
       const activeTabId = ownerTabId ?? (await tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id;
       if (activeTabId === undefined) throw new Error('找不到目前使用中的 YouTube 分頁。');
-      const message = await tabs.sendMessage(activeTabId, { type: 'REQUEST_STATE' });
+      const identity = currentSynchronizationRef.current;
+      const request = identity
+        ? { type: 'RETRY_CAPTIONS' as const, ...identity }
+        : { type: 'REQUEST_STATE' as const };
+      const message = await tabs.sendMessage(activeTabId, request);
       if (message && typeof message === 'object' && 'type' in message) {
         runtimeMessageListenerRef.current(message as ContentMessage);
       }
@@ -536,21 +519,26 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         stage: 'player-response',
         status: 'error',
         code: 'EXTENSION_CONNECTION_FAILED',
-        message: '請在 YouTube 分頁按 Ctrl+Shift+R，再重新抓取字幕。',
-        details: { error: message },
+        message: '請在 YouTube 分頁按 Ctrl+Shift+R，再重試完整字幕。',
+        details: { error: message, source: 'extension-content-script', action: 'retry' },
       }]);
-      setError(`重新抓取字幕失敗：${message}`);
-      setRefreshing(false);
+      setCaptionLifecycle({
+        status: 'retryable-error',
+        code: 'EXTENSION_CONNECTION_FAILED',
+        message: `重新抓取完整字幕失敗：${message}`,
+        action: 'retry',
+      });
     }
   }
 
   function handlePlaybackAction(action: TranscriptPlaybackAction, studySentence: StudySentence): void {
     const activeTabId = ownerTabId ?? activeTabIdRef.current;
     const tabs = typeof chrome !== 'undefined' ? chrome.tabs : undefined;
-    if (activeTabId === undefined || !tabs) return;
+    const identity = currentSynchronizationRef.current;
+    if (activeTabId === undefined || !tabs || !identity) return;
     const replayRange = replayRangeForCue(studySentence);
     if (action === 'jump') {
-      void tabs.sendMessage(activeTabId, { type: 'JUMP_TO_HERE', timeMs: replayRange.startMs });
+      void tabs.sendMessage(activeTabId, { type: 'JUMP_TO_HERE', ...identity, timeMs: replayRange.startMs });
       return;
     }
     if (action === 'play-from-here') {
@@ -569,6 +557,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
       : replayRange;
     void tabs.sendMessage(activeTabId, {
       type: 'REPLAY_RANGE',
+      ...identity,
       ...fixedReplayRange,
     });
   }
@@ -695,14 +684,29 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     </nav>
     <section className={`tab-content ${tab === 'transcript' ? 'transcript-view' : ''}`}>
     {tab === 'transcript' && <>
-      <div className="transcript-actions">
-        <button type="button" className="primary-action" onClick={() => void refreshTranscript()} disabled={refreshing}>
-          重新抓取字幕
-        </button>
-        {refreshing && <p role="status">正在重新抓取字幕…</p>}
+      <div className="transcript-actions" data-caption-state={captionLifecycle.status}>
+        {captionLifecycle.status === 'loading' && <p role="status">{captionLifecycle.message}</p>}
+        {captionLifecycle.status === 'ready' && <>
+          <p role="status">{captionLifecycle.message}</p>
+          <button type="button" className="primary-action" onClick={() => void refreshTranscript()}>
+            重新抓取字幕
+          </button>
+        </>}
+        {captionLifecycle.status === 'retryable-error' && <>
+          <p role="alert">{captionLifecycle.message}</p>
+          <button type="button" className="primary-action" onClick={() => void refreshTranscript()}>
+            重新抓取字幕
+          </button>
+        </>}
+        {captionLifecycle.status === 'no-english-track' && <>
+          <p role="status">{captionLifecycle.message} 請在 YouTube 開啟英文 CC，或選擇另一部影片。</p>
+          <button type="button" className="primary-action" onClick={() => void refreshTranscript()}>
+            重新抓取字幕
+          </button>
+        </>}
       </div>
       <CaptionDiagnostics entries={displayedDiagnostics} />
-      {transcriptSession.mode === 'focused-study' && <section
+      {captionLifecycle.status === 'ready' && transcriptSession.mode === 'focused-study' && <section
         className="focused-study-controls"
         aria-label="Focused Study controls"
       >
@@ -742,7 +746,6 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         isSaved={savedHistoryId !== null}
         isFavorite={isFavorite}
       />}
-      {error && <p role="alert">{error}</p>}
     </>}
     {tab === 'history' && <HistoryView />}
     {tab === 'settings' && settingsLoadState === 'loading' && <p role="status">正在讀取設定…</p>}

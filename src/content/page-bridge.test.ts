@@ -16,8 +16,10 @@ function responseFor(videoId: string, baseUrl: string) {
       playerCaptionsTracklistRenderer: {
         captionTracks: [{
           baseUrl,
+          kind: baseUrl.includes('automatic') ? 'asr' : undefined,
           languageCode: 'en',
           name: { simpleText: 'English' },
+          vssId: baseUrl.includes('automatic') ? 'a.en' : '.en',
         }],
       },
     },
@@ -46,10 +48,17 @@ function pageWindowFor(
   } as unknown as Window;
 }
 
-function installMoviePlayer(response: object): void {
+function installMoviePlayer(response: object, activeTrack?: object): void {
   const player = document.createElement('div');
   player.id = 'movie_player';
-  (player as HTMLDivElement & { getPlayerResponse: () => object }).getPlayerResponse = () => response;
+  const typedPlayer = player as HTMLDivElement & {
+    getOption: (namespace: string, option: string) => object | undefined;
+    getPlayerResponse: () => object;
+  };
+  typedPlayer.getPlayerResponse = () => response;
+  typedPlayer.getOption = (namespace, option) => (
+    namespace === 'captions' && option === 'track' ? activeTrack : undefined
+  );
   document.body.append(player);
 }
 
@@ -63,6 +72,7 @@ function expectedBridgeResponse(response = playerResponse) {
       videoDetails: { videoId: 'video-1' },
       captions: response.captions,
     },
+    captionSelection: { captionsEnabled: false },
   };
 }
 
@@ -118,6 +128,38 @@ describe('page bridge', () => {
 
     expect(postMessage).toHaveBeenCalledWith(expectedBridgeResponse(currentResponse), '*');
     expect(postMessage.mock.calls[0][0].playerResponse.captions).toEqual(currentResponse.captions);
+  });
+
+  it('discovers the active automatic Caption Track when YouTube CC is enabled', async () => {
+    const automaticResponse = responseFor('video-1', 'https://captions.test/automatic');
+    const activeTrack = {
+      kind: 'asr',
+      languageCode: 'en',
+      name: { simpleText: 'English (auto-generated)' },
+      vssId: 'a.en',
+    };
+    const ccButton = document.createElement('button');
+    ccButton.className = 'ytp-subtitles-button';
+    ccButton.setAttribute('aria-pressed', 'true');
+    document.body.append(ccButton);
+    const postMessage = vi.fn();
+    const pageWindow = pageWindowFor('video-1', postMessage);
+    installMoviePlayer(automaticResponse, activeTrack);
+    const { createPageBridgeMessageHandler } = await import('./page-bridge');
+
+    postBridgeRequest(createPageBridgeMessageHandler(pageWindow, document), pageWindow);
+
+    expect(postMessage.mock.calls[0][0].captionSelection).toEqual({
+      captionsEnabled: true,
+      activeTrack: {
+        kind: 'asr',
+        languageCode: 'en',
+        name: 'English (auto-generated)',
+        vssId: 'a.en',
+      },
+    });
+    expect(postMessage.mock.calls[0][0].playerResponse.captions)
+      .toEqual(automaticResponse.captions);
   });
 
   it('retries a request after the page data becomes available', async () => {

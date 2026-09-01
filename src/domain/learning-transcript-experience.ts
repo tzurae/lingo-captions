@@ -95,53 +95,6 @@ function canAlignRenderedProgress(
   return findTokenSequence(sourceTokens, renderedTokens) >= 0;
 }
 
-function projectVisibleDomExperience(
-  track: CaptionTrack,
-  playbackMs: number | null,
-  renderedProgress: RenderedCaptionProgress | null,
-): LearningTranscriptExperience {
-  const currentSourceCueIds = track.activeGroup?.cueIds ?? [];
-  if (!renderedProgress) return baseExperience(track.cues, currentSourceCueIds, playbackMs);
-  if (!renderedProgress.activeGroup || renderedProgress.cues.length === 0) {
-    return baseExperience(track.cues, [], playbackMs);
-  }
-
-  const renderedById = new Map(renderedProgress.cues.map((cue) => [cue.id, cue]));
-  const renderedCues = renderedProgress.activeGroup.cueIds
-    .map((id) => renderedById.get(id))
-    .filter((cue): cue is CaptionCue => cue !== undefined);
-  if (renderedCues.length === 0) return baseExperience(track.cues, [], playbackMs);
-
-  const currentSourceIdSet = new Set(currentSourceCueIds);
-  const firstCurrentIndex = track.cues.findIndex((cue) => currentSourceIdSet.has(cue.id));
-  const insertionIndex = firstCurrentIndex < 0 ? track.cues.length : firstCurrentIndex;
-  const projectedTranscript: CaptionCue[] = [];
-  for (const [index, cue] of track.cues.entries()) {
-    if (index === insertionIndex) projectedTranscript.push(...renderedCues.map((renderedCue) => ({ ...renderedCue })));
-    if (!currentSourceIdSet.has(cue.id)) projectedTranscript.push(cue);
-  }
-  if (insertionIndex === track.cues.length) {
-    projectedTranscript.push(...renderedCues.map((renderedCue) => ({ ...renderedCue })));
-  }
-
-  const currentCueIds = renderedCues.map((cue) => cue.id);
-  const visibleCues = currentNeighborhood(projectedTranscript, currentCueIds, playbackMs);
-  const sourceIndices = sourceCueIndices(track.cues);
-  const sourceCueIndexByProjectedId: Record<string, number> = {};
-  for (const cue of projectedTranscript) {
-    const sourceIndex = sourceIndices[cue.id];
-    sourceCueIndexByProjectedId[cue.id] = sourceIndex ?? Math.max(0, insertionIndex);
-  }
-  return {
-    fullTranscript: track.cues,
-    continuousViewingProjection: projectedTranscript,
-    visibleCues,
-    currentSourceCueIds,
-    currentCueIds,
-    sourceCueIndexByProjectedId,
-  };
-}
-
 export function projectLearningTranscriptExperience({
   track,
   playbackMs,
@@ -153,9 +106,6 @@ export function projectLearningTranscriptExperience({
 }): LearningTranscriptExperience {
   if (!track) return baseExperience([], [], playbackMs);
 
-  if (track.source === 'visible-dom') {
-    return projectVisibleDomExperience(track, playbackMs, renderedProgress);
-  }
   if (playbackMs === null) return baseExperience(track.cues, [], playbackMs);
 
   const currentSourceCues = track.cues.filter(

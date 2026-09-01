@@ -61,7 +61,6 @@ export function parseCaptionTrack(raw: RawCaptionTrack): CaptionTrack {
   return {
     language: raw.language,
     isEnglish: true,
-    source: 'timedtext',
     cues: [...uniqueCues.values()].sort((left, right) => left.startMs - right.startMs),
   };
 }

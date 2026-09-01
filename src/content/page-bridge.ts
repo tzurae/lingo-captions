@@ -7,8 +7,22 @@ const retryCount = 3;
 
 type CaptionTrack = {
   baseUrl?: string;
+  kind?: string;
   languageCode?: string;
   name?: { simpleText?: string };
+  vssId?: string;
+};
+
+type ActiveCaptionTrack = {
+  kind?: string;
+  languageCode?: string;
+  name?: string;
+  vssId?: string;
+};
+
+type CaptionSelection = {
+  captionsEnabled: boolean;
+  activeTrack?: ActiveCaptionTrack;
 };
 
 export type PlayerResponse = {
@@ -113,8 +127,47 @@ function getCaptionTracks(response: unknown): CaptionTrack[] | undefined {
     if (isRecord(track.name) && typeof track.name.simpleText === 'string') {
       sanitized.name = { simpleText: track.name.simpleText };
     }
+    if (typeof track.kind === 'string') {
+      sanitized.kind = track.kind;
+    }
+    if (typeof track.vssId === 'string') {
+      sanitized.vssId = track.vssId;
+    }
     return sanitized;
   }) : undefined;
+}
+
+function sanitizeActiveTrack(value: unknown): ActiveCaptionTrack | undefined {
+  if (!isRecord(value)) return undefined;
+  const activeTrack: ActiveCaptionTrack = {};
+  const kind = value.kind;
+  const languageCode = value.languageCode ?? value.language_code;
+  const vssId = value.vssId ?? value.vss_id;
+  const name = isRecord(value.name) ? value.name.simpleText : value.name;
+  if (typeof kind === 'string') activeTrack.kind = kind;
+  if (typeof languageCode === 'string') activeTrack.languageCode = languageCode;
+  if (typeof name === 'string') activeTrack.name = name;
+  if (typeof vssId === 'string') activeTrack.vssId = vssId;
+  return Object.keys(activeTrack).length > 0 ? activeTrack : undefined;
+}
+
+function getCaptionSelection(pageDocument: Document): CaptionSelection {
+  const moviePlayer = pageDocument.getElementById('movie_player') as (HTMLElement & {
+    getOption?: (namespace: string, option: string) => unknown;
+  }) | null;
+  let activeTrack: ActiveCaptionTrack | undefined;
+  try {
+    activeTrack = sanitizeActiveTrack(moviePlayer?.getOption?.('captions', 'track'));
+  } catch {
+    activeTrack = undefined;
+  }
+  const captionsEnabled = pageDocument
+    .querySelector('.ytp-subtitles-button')
+    ?.getAttribute('aria-pressed') === 'true';
+  return {
+    captionsEnabled,
+    ...(activeTrack ? { activeTrack } : {}),
+  };
 }
 
 function hasExactVideoIdentity(response: unknown, expectedVideoId: string): response is PlayerResponse {
@@ -203,6 +256,7 @@ export function createPageBridgeMessageHandler(
               playerCaptionsTracklistRenderer: { captionTracks },
             },
           },
+          captionSelection: getCaptionSelection(pageDocument),
         }, '*');
         return;
       }

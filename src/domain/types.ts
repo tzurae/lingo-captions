@@ -5,8 +5,6 @@ export type CaptionCue = {
   text: string;
 };
 
-export type CaptionSource = 'timedtext' | 'visible-dom';
-
 export type ActiveCaptionGroup = {
   cueIds: string[];
   startMs: number;
@@ -15,9 +13,7 @@ export type ActiveCaptionGroup = {
 export type CaptionTrack = {
   language: string;
   isEnglish: boolean;
-  source: CaptionSource;
   cues: CaptionCue[];
-  activeGroup?: ActiveCaptionGroup;
 };
 
 export type RenderedCaptionProgress = {
@@ -29,35 +25,51 @@ export type RenderedCaptionProgress = {
 export type CaptionDiagnosticStage =
   | 'player-response'
   | 'caption-tracks'
+  | 'caption-progress'
+  | 'track-policy'
   | 'english-track'
   | 'timedtext-download'
   | 'timedtext-parse'
-  | 'visible-dom'
   | 'ready';
 
 export type CaptionDiagnostic = {
   stage: CaptionDiagnosticStage;
-  status: 'running' | 'success' | 'error' | 'fallback';
+  status: 'running' | 'success' | 'error';
   message: string;
   code?: string;
   details?: Record<string, string | number | string[]>;
 };
 
+export type CaptionLifecycle =
+  | { status: 'loading'; message: string }
+  | { status: 'ready'; message: string }
+  | { status: 'retryable-error'; code: string; message: string; action: 'retry' }
+  | { status: 'no-english-track'; message: string; action: 'enable-english-cc' };
+
+export type CaptionReadyLifecycle = Extract<CaptionLifecycle, { status: 'ready' }>;
+export type CaptionPendingLifecycle = Exclude<CaptionLifecycle, { status: 'ready' }>;
+
+type SynchronizedContentMessage = {
+  videoId: string;
+  synchronizationId: string;
+};
+
 export type ContentMessage =
-  | { type: 'CAPTIONS_UPDATED'; videoId: string; videoTitle: string; videoUrl: string; track: CaptionTrack }
-  | { type: 'CAPTION_PROGRESS_UPDATED'; videoId: string; progress: RenderedCaptionProgress }
-  | { type: 'PLAYBACK_UPDATED'; videoId: string; currentTimeMs: number }
-  | { type: 'VIDEO_CHANGED'; videoId: string; videoTitle: string; videoUrl: string }
-  | { type: 'NO_CAPTIONS'; videoId: string; reason: 'not-found' | 'not-english' | 'unsupported' }
-  | { type: 'CAPTION_DIAGNOSTIC'; videoId: string; diagnostic: CaptionDiagnostic };
+  | (SynchronizedContentMessage & { type: 'CAPTIONS_UPDATED'; videoTitle: string; videoUrl: string; track: CaptionTrack; lifecycle: CaptionReadyLifecycle })
+  | (SynchronizedContentMessage & { type: 'CAPTION_PROGRESS_UPDATED'; progress: RenderedCaptionProgress })
+  | (SynchronizedContentMessage & { type: 'PLAYBACK_UPDATED'; currentTimeMs: number })
+  | (SynchronizedContentMessage & { type: 'VIDEO_CHANGED'; videoTitle: string; videoUrl: string })
+  | (SynchronizedContentMessage & { type: 'CAPTION_LIFECYCLE_UPDATED'; lifecycle: CaptionPendingLifecycle })
+  | (SynchronizedContentMessage & { type: 'CAPTION_DIAGNOSTIC'; diagnostic: CaptionDiagnostic });
 
 export type SidePanelContentMessage =
   | { type: 'REQUEST_STATE' }
-  | { type: 'PAUSE_PLAYBACK' }
-  | { type: 'RESUME_PLAYBACK' }
-  | { type: 'JUMP_TO_HERE'; timeMs: number }
-  | { type: 'PLAY_FROM_HERE'; timeMs: number }
-  | { type: 'REPLAY_RANGE'; startMs: number; endMs: number };
+  | (SynchronizedContentMessage & { type: 'RETRY_CAPTIONS' })
+  | (SynchronizedContentMessage & { type: 'PAUSE_PLAYBACK' })
+  | (SynchronizedContentMessage & { type: 'RESUME_PLAYBACK' })
+  | (SynchronizedContentMessage & { type: 'JUMP_TO_HERE'; timeMs: number })
+  | (SynchronizedContentMessage & { type: 'PLAY_FROM_HERE'; timeMs: number })
+  | (SynchronizedContentMessage & { type: 'REPLAY_RANGE'; startMs: number; endMs: number });
 
 export type QueryIntentId =
   | 'translate_sentence'

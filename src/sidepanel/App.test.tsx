@@ -60,8 +60,11 @@ vi.mock('./components/TranscriptPanel', () => ({
   </>,
 }));
 
-let onMessage: ((message: ContentMessage, sender?: chrome.runtime.MessageSender) => void) | undefined;
-let registeredListeners: Array<(message: ContentMessage, sender?: chrome.runtime.MessageSender) => void>;
+type MessageListener = (message: ContentMessage, sender?: chrome.runtime.MessageSender) => void;
+
+let onMessage: MessageListener | undefined;
+let registeredListeners: MessageListener[];
+let runtimeMessageListener: MessageListener | undefined;
 let onStorageChanged: ((changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => void) | undefined;
 let previousUrl: string;
 
@@ -80,18 +83,25 @@ const publicSettings: PublicSettings = {
   apiKeyLastFour: '1234',
 };
 
+const readyLifecycle = { status: 'ready', message: 'Full transcript ready.' } as const;
+
 describe('App history actions', () => {
   beforeEach(() => {
     previousUrl = window.location.href;
     vi.clearAllMocks();
     onMessage = undefined;
+    runtimeMessageListener = undefined;
     onStorageChanged = undefined;
     registeredListeners = [];
     Object.assign(globalThis, {
       chrome: {
         runtime: {
           onMessage: {
-            addListener: vi.fn((listener) => { onMessage = listener; registeredListeners.push(listener); }),
+            addListener: vi.fn((listener: MessageListener) => {
+              runtimeMessageListener = listener;
+              onMessage = listener;
+              registeredListeners.push(listener);
+            }),
             removeListener: vi.fn(),
           },
         },
@@ -186,11 +196,12 @@ describe('App history actions', () => {
 
     render(<App />);
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
     }));
 
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
@@ -204,7 +215,7 @@ describe('App history actions', () => {
     const user = userEvent.setup();
     render(<App />);
     await waitFor(() => expect(onMessage).toBeDefined());
-    await act(async () => onMessage?.({ type: 'CAPTIONS_UPDATED', videoId: 'video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1', track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] } }));
+    await act(async () => onMessage?.({ type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle, videoId: 'video-1', synchronizationId: 'sync:video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1', track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] } }));
 
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
     await user.click(screen.getByRole('button', { name: '翻譯整句' }));
@@ -221,11 +232,12 @@ describe('App history actions', () => {
   it('requests the active tab state when the tabs API is available', async () => {
     const query = vi.fn().mockResolvedValue([{ id: 42 }]);
     const sendMessage = vi.fn().mockResolvedValue({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-2',
+      synchronizationId: 'video-2',
       videoTitle: 'Video two',
       videoUrl: 'https://youtube.test/watch?v=video-2',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [] },
+      track: { language: 'en', isEnglish: true, cues: [] },
     });
     Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
 
@@ -245,16 +257,17 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 1_000, endMs: 2_000, text: 'A replayable sentence.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 1_000, endMs: 2_000, text: 'A replayable sentence.' }] },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', videoId: 'video-1', synchronizationId: 'sync:video-1', startMs: 1_000, endMs: 2_000 });
   });
 
   it('accepts an exact zero start for a Replay Range', async () => {
@@ -266,16 +279,17 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'An initial sentence.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'An initial sentence.' }] },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', startMs: 0, endMs: 1_000 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', videoId: 'video-1', synchronizationId: 'sync:video-1', startMs: 0, endMs: 1_000 });
   });
 
   it('sends distinct Jump and Play from Here intents and exits Focused Study', async () => {
@@ -286,29 +300,30 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 1_000, endMs: 2_000, text: 'A historical sentence.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 1_000, endMs: 2_000, text: 'A historical sentence.' }] },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
     expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Jump first cue' }));
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'JUMP_TO_HERE', timeMs: 1_000 });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'JUMP_TO_HERE', videoId: 'video-1', synchronizationId: 'sync:video-1', timeMs: 1_000 });
     expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'REPLAY_RANGE', videoId: 'video-1', synchronizationId: 'sync:video-1', startMs: 1_000, endMs: 2_000 });
     expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
     expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
     expect(screen.getByTestId('focus-request')).toHaveTextContent('none');
 
     await user.click(screen.getByRole('button', { name: 'Play from first cue' }));
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 1_000 });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', videoId: 'video-1', synchronizationId: 'sync:video-1', timeMs: 1_000 });
     expect(screen.queryByRole('dialog', { name: 'English learning assistant' })).not.toBeInTheDocument();
   });
 
@@ -327,16 +342,17 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+      track: { language: 'en', isEnglish: true, cues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
 
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
     expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
     expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
       'Study sentence 1. Study sentence 2. Study sentence 3. Study sentence 4. Study sentence 5.',
@@ -359,23 +375,24 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: initialCues },
+      track: { language: 'en', isEnglish: true, cues: initialCues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { ...initialCues[0], text: 'Mutated Study Sentence.' },
           { ...initialCues[1], text: 'Mutated context after.' },
           initialCues[2],
@@ -386,7 +403,7 @@ describe('App history actions', () => {
 
     await user.click(screen.getByRole('button', { name: '翻譯整句' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
     await waitFor(() => expect(messageClient.runQuery).toHaveBeenCalledWith(
       expect.objectContaining({
         sentence: 'Original Study Sentence.',
@@ -403,15 +420,15 @@ describe('App history actions', () => {
     const user = userEvent.setup();
     render(<App />);
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Frozen Study Sentence.' },
           { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Live second sentence.' },
         ],
@@ -420,15 +437,15 @@ describe('App history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
 
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [{ id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Live second sentence.' }],
+                cues: [{ id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Live second sentence.' }],
       },
     }));
 
@@ -457,15 +474,17 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+      track: { language: 'en', isEnglish: true, cues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await act(async () => onMessage?.({
       type: 'PLAYBACK_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       currentTimeMs: 1_500,
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
@@ -473,7 +492,7 @@ describe('App history actions', () => {
     sendMessage.mockClear();
     await user.click(screen.getByRole('button', { name: 'Return to Current' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
     expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
     expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
     expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-2:0:/);
@@ -482,7 +501,7 @@ describe('App history actions', () => {
     sendMessage.mockClear();
     await user.click(screen.getByRole('button', { name: 'Resume' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'RESUME_PLAYBACK' });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'RESUME_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
     expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
     expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
   });
@@ -496,15 +515,15 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-before-gap', startMs: 0, endMs: 1_000, text: 'Before gap.' },
           { id: 'cue-after-gap', startMs: 2_000, endMs: 3_000, text: 'After gap.' },
         ],
@@ -513,6 +532,7 @@ describe('App history actions', () => {
     await act(async () => onMessage?.({
       type: 'PLAYBACK_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       currentTimeMs: 1_500,
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
@@ -520,7 +540,7 @@ describe('App history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Return to Current' }));
 
     expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-before-gap:0:/);
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
   });
 
   it('returns to the stable Study Sentence row while its current text is transient', async () => {
@@ -532,15 +552,15 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'source-1', startMs: 0, endMs: 2_000, text: 'I think' },
           { id: 'source-2', startMs: 0, endMs: 2_000, text: 'we should start.' },
         ],
@@ -549,11 +569,13 @@ describe('App history actions', () => {
     await act(async () => onMessage?.({
       type: 'PLAYBACK_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       currentTimeMs: 1_000,
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await act(async () => onMessage?.({
       type: 'CAPTION_PROGRESS_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       progress: {
         capturedAtMs: 1_000,
         cues: [{ id: 'rendered-combined', startMs: 900, endMs: 1_500, text: 'I think we should' }],
@@ -580,15 +602,15 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(screen.getByTestId('auto-follow')).toHaveTextContent('false'));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Opted out sentence.' }],
+                cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Opted out sentence.' }],
       },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
@@ -616,11 +638,12 @@ describe('App history actions', () => {
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     const listener = registeredListeners[0];
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+      track: { language: 'en', isEnglish: true, cues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
 
@@ -630,12 +653,14 @@ describe('App history actions', () => {
           listener({
             type: 'PLAYBACK_UPDATED',
             videoId: 'video-1',
+            synchronizationId: 'sync:video-1',
             currentTimeMs: 1_000 + index * 25,
           }, { tab: { id: 42 } } as chrome.runtime.MessageSender);
         } else {
           listener({
             type: 'CAPTION_PROGRESS_UPDATED',
             videoId: 'video-1',
+            synchronizationId: 'sync:video-1',
             progress: {
               capturedAtMs: 1_000 + index * 25,
               cues: [{ id: `progress-${index}`, startMs: 1_000, endMs: 2_000, text: `Progress ${index}` }],
@@ -650,11 +675,8 @@ describe('App history actions', () => {
     expect(screen.getByTestId('transcript-cues')).toHaveTextContent('Pinned Study Sentence.');
     sendMessage.mockClear();
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
-    expect(sendMessage).toHaveBeenCalledWith(42, {
-      type: 'REPLAY_RANGE',
-      startMs: 0,
-      endMs: 1_000,
-    });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', videoId: 'video-1', synchronizationId: 'sync:video-1', startMs: 0,
+    endMs: 1_000, });
   });
 
   it('keeps history stationary while new segments accumulate behind a persistent return control', async () => {
@@ -672,11 +694,12 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: initialCues },
+      track: { language: 'en', isEnglish: true, cues: initialCues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     sendMessage.mockClear();
 
@@ -686,15 +709,15 @@ describe('App history actions', () => {
     expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
 
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           ...initialCues,
           { id: 'cue-4', startMs: 3_000, endMs: 4_000, text: 'New four.' },
           { id: 'cue-5', startMs: 4_000, endMs: 5_000, text: 'New five.' },
@@ -708,7 +731,7 @@ describe('App history actions', () => {
     );
     expect(screen.getByTestId('focus-request')).toHaveTextContent('none');
     await user.click(screen.getByRole('button', { name: 'Return to Current' }));
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
   });
   it('retains non-selected historical rows after shrinking updates and Play from Here', async () => {
     const user = userEvent.setup();
@@ -724,24 +747,25 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: initialCues },
+      track: { language: 'en', isEnglish: true, cues: initialCues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await user.click(screen.getByRole('button', { name: 'Browse earlier transcript' }));
 
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           initialCues[2],
           { id: 'cue-4', startMs: 3_000, endMs: 4_000, text: 'New four.' },
         ],
@@ -755,7 +779,7 @@ describe('App history actions', () => {
     expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
       'Retained one. Retained two. Current three. New four.',
     );
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 0 });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', videoId: 'video-1', synchronizationId: 'sync:video-1', timeMs: 0 });
     expect(screen.getByTestId('current-cues')).toHaveTextContent('study:cue-1:0');
     expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-1:0:/);
   });
@@ -765,15 +789,15 @@ describe('App history actions', () => {
     vi.mocked(messageClient.runQuery).mockRejectedValueOnce(new Error('Query failed.'));
     render(<App />);
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Failure Study Sentence.' }],
+                cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Failure Study Sentence.' }],
       },
     }));
 
@@ -800,15 +824,17 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+      track: { language: 'en', isEnglish: true, cues },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await act(async () => onMessage?.({
       type: 'PLAYBACK_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       currentTimeMs: 2_500,
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
@@ -816,7 +842,7 @@ describe('App history actions', () => {
 
     await user.click(screen.getByRole('button', { name: 'Play from first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 0 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PLAY_FROM_HERE', videoId: 'video-1', synchronizationId: 'sync:video-1', timeMs: 0 });
     expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
     expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
     expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-1:0:/);
@@ -833,21 +859,21 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Keyboard Study Sentence.' }],
+                cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Keyboard Study Sentence.' }],
       },
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
 
     screen.getByRole('button', { name: 'Study first cue' }).focus();
     await user.keyboard('{Enter}');
-    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
 
     screen.getByRole('button', { name: '翻譯整句' }).focus();
     await user.keyboard('{Enter}');
@@ -855,199 +881,15 @@ describe('App history actions', () => {
 
     screen.getByRole('button', { name: 'Replay first cue' }).focus();
     await user.keyboard('{Enter}');
-    expect(sendMessage).toHaveBeenLastCalledWith(42, {
-      type: 'REPLAY_RANGE',
-      startMs: 0,
-      endMs: 1_000,
-    });
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'REPLAY_RANGE', videoId: 'video-1', synchronizationId: 'sync:video-1', startMs: 0,
+    endMs: 1_000, });
     expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
 
     sendMessage.mockClear();
     screen.getByRole('button', { name: 'Return to Current' }).focus();
     await user.keyboard('{Enter}');
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK', videoId: 'video-1', synchronizationId: 'sync:video-1' });
     expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
-  });
-
-  it('keeps every visible-DOM group cue current after playback updates', async () => {
-    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
-
-    render(<App />);
-    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
-    const listener = registeredListeners[0];
-    const visibleCues = [
-      { id: 'visible-0', startMs: 10_000, endMs: 14_000, text: 'First visible sentence.' },
-      { id: 'visible-1', startMs: 10_000, endMs: 14_000, text: 'Second visible sentence.' },
-      { id: 'visible-2', startMs: 10_000, endMs: 14_000, text: 'Third visible sentence.' },
-    ];
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: visibleCues,
-        activeGroup: { cueIds: ['visible-0', 'visible-1', 'visible-2'], startMs: 10_000 },
-      },
-    }));
-    await act(async () => listener({
-      type: 'PLAYBACK_UPDATED',
-      videoId: 'video-1',
-      currentTimeMs: 20_000,
-    }));
-
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-0:0,study:visible-1:0,study:visible-2:0');
-  });
-
-  it('uses group range for active visible cues and cue range for inactive visible cues', async () => {
-    const user = userEvent.setup();
-    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
-
-    render(<App />);
-    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
-    const listener = registeredListeners[0];
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: [
-          { id: 'visible-old', startMs: 2_000, endMs: 6_000, text: 'Historical sentence.' },
-          { id: 'visible-1', startMs: 10_100, endMs: 14_000, text: 'Second visible sentence.' },
-          { id: 'visible-2', startMs: 10_200, endMs: 14_000, text: 'Third visible sentence.' },
-        ],
-        activeGroup: { cueIds: ['visible-1', 'visible-2'], startMs: 10_000 },
-      },
-    }));
-
-    await user.click(screen.getByRole('button', { name: 'Replay second cue' }));
-    expect(sendMessage).toHaveBeenLastCalledWith(42, {
-      type: 'REPLAY_RANGE',
-      startMs: 10_000,
-      endMs: 14_000,
-    });
-
-    await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
-    expect(sendMessage).toHaveBeenLastCalledWith(42, {
-      type: 'REPLAY_RANGE',
-      startMs: 2_000,
-      endMs: 6_000,
-    });
-  });
-
-  it('sanitizes visible groups and clears them when the selected video changes', async () => {
-    const user = userEvent.setup();
-    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
-    const sendMessage = vi.fn().mockResolvedValue(undefined);
-    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
-    render(<App />);
-    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
-    const listener = registeredListeners[0];
-    const visibleCues = [
-      { id: 'visible-0', startMs: 10_000, endMs: 14_000, text: 'First visible sentence.' },
-      { id: 'visible-1', startMs: 10_000, endMs: 14_000, text: 'Second visible sentence.' },
-      { id: 'visible-2', startMs: 10_000, endMs: 14_000, text: 'Third visible sentence.' },
-    ];
-
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: visibleCues,
-        activeGroup: {
-          cueIds: ['missing', 'visible-1', 'visible-1', 'visible-2'],
-          startMs: 10_000,
-        },
-      },
-    }));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-1:0,study:visible-2:0');
-
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: visibleCues,
-        activeGroup: { cueIds: ['visible-0', 'visible-2'], startMs: 10_000 },
-      },
-    }));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
-
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: visibleCues,
-        activeGroup: { cueIds: ['visible-0', 'visible-1'], startMs: 10_000 },
-      },
-    }));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-0:0,study:visible-1:0');
-    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
-    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
-
-    await act(async () => listener({
-      type: 'VIDEO_CHANGED',
-      videoId: 'video-2',
-      videoTitle: 'Video two',
-      videoUrl: 'https://youtube.test/watch?v=video-2',
-    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
-    expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
-  });
-
-  it('clears a visible group when captions become unavailable', async () => {
-    render(<App />);
-    await waitFor(() => expect(registeredListeners).toHaveLength(1));
-    const listener = registeredListeners[0];
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: [
-          { id: 'visible-0', startMs: 10_000, endMs: 14_000, text: 'First visible sentence.' },
-          { id: 'visible-1', startMs: 10_000, endMs: 14_000, text: 'Second visible sentence.' },
-        ],
-        activeGroup: { cueIds: ['visible-0', 'visible-1'], startMs: 10_000 },
-      },
-    }));
-    expect(screen.getByTestId('current-cues')).not.toHaveTextContent('none');
-
-    await act(async () => listener({
-      type: 'NO_CAPTIONS',
-      videoId: 'video-1',
-      reason: 'not-found',
-    }));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
   });
 
   it('keeps the floating assistant open and shows loading while a query is pending', async () => {
@@ -1057,11 +899,12 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(onMessage).toBeDefined());
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
     }));
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
 
@@ -1085,15 +928,15 @@ describe('App history actions', () => {
     render(<App />);
     await waitFor(() => expect(onMessage).toBeDefined());
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' },
           { id: 'cue-2', startMs: 1000, endMs: 2000, text: 'A middle phrase.' },
         ],
@@ -1117,8 +960,8 @@ describe('App history actions', () => {
     vi.mocked(messageClient.runQuery).mockReturnValueOnce(new Promise((resolve) => { resolveQuery = resolve; }));
     render(<App />);
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED', videoId: 'video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle, videoId: 'video-1', synchronizationId: 'sync:video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
     }));
 
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
@@ -1144,20 +987,21 @@ describe('App history actions', () => {
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
 
     await user.click(screen.getByRole('button', { name: '重新抓取字幕' }));
-    expect(screen.getByText('正在重新抓取字幕…')).toBeInTheDocument();
+    expect(screen.getByText('正在載入完整英文字幕…')).toBeInTheDocument();
     expect(messageClient.runQuery).not.toHaveBeenCalled();
     expect(messageClient.saveHistory).not.toHaveBeenCalled();
 
     await act(async () => resolveRefresh({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-refresh',
+      synchronizationId: 'video-refresh',
       videoTitle: 'Refreshed video',
       videoUrl: 'https://youtube.test/watch?v=video-refresh',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-refresh', startMs: 0, endMs: 1000, text: 'Refreshed transcript.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-refresh', startMs: 0, endMs: 1000, text: 'Refreshed transcript.' }] },
     }));
 
     await waitFor(() => expect(screen.getByTestId('transcript-cues')).toHaveTextContent('Refreshed transcript.'));
-    expect(screen.queryByText('正在重新抓取字幕…')).not.toBeInTheDocument();
+    expect(screen.queryByText('正在載入完整英文字幕…')).not.toBeInTheDocument();
     expect(sendMessage).toHaveBeenCalledTimes(2);
   });
 
@@ -1173,18 +1017,26 @@ describe('App history actions', () => {
     await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
     await user.click(screen.getByRole('button', { name: '重新抓取字幕' }));
 
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('重新抓取字幕失敗：The active tab is unavailable.'));
-    expect(screen.queryByText('正在重新抓取字幕…')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('重新抓取完整字幕失敗：The active tab is unavailable.'));
+    expect(screen.queryByText('正在載入完整英文字幕…')).not.toBeInTheDocument();
     expect(messageClient.runQuery).not.toHaveBeenCalled();
   });
 
   it('shows and expands an exact caption pipeline diagnostic', async () => {
     render(<App />);
     await waitFor(() => expect(onMessage).toBeDefined());
+    await act(async () => onMessage?.({
+      type: 'VIDEO_CHANGED',
+      videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+    }));
 
     await act(async () => onMessage?.({
       type: 'CAPTION_DIAGNOSTIC',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       diagnostic: {
         stage: 'timedtext-parse',
         status: 'error',
@@ -1193,7 +1045,7 @@ describe('App history actions', () => {
       },
     }));
 
-    expect(screen.getAllByText('字幕檔下載成功，但解析不到任何字幕內容。')).toHaveLength(2);
+    expect(screen.getAllByText('字幕檔下載成功，但解析不到任何字幕內容。')).toHaveLength(1);
     expect(screen.getByText('字幕診斷（1）').closest('details')).toHaveAttribute('open');
   });
 
@@ -1205,7 +1057,7 @@ describe('App history actions', () => {
     render(<App />);
 
     expect(await screen.findByRole('alert')).toHaveTextContent('無法連線到 YouTube 字幕腳本');
-    expect(screen.getByText('請在 YouTube 分頁按 Ctrl+Shift+R，再重新抓取字幕。')).toBeVisible();
+    expect(screen.getByText('請在 YouTube 分頁按 Ctrl+Shift+R，再重試完整字幕。')).toBeVisible();
   });
 
   it('ignores cues and playback from a runtime sender in a different tab', async () => {
@@ -1220,13 +1072,14 @@ describe('App history actions', () => {
     const foreignSender = { tab: { id: 43 } } as chrome.runtime.MessageSender;
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'foreign-video',
+      synchronizationId: 'sync:foreign-video',
       videoTitle: 'Foreign video',
       videoUrl: 'https://youtube.test/watch?v=foreign-video',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'foreign-cue', startMs: 0, endMs: 1000, text: 'Foreign cue.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'foreign-cue', startMs: 0, endMs: 1000, text: 'Foreign cue.' }] },
     }, foreignSender));
-    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'foreign-video', currentTimeMs: 500 }, foreignSender));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'foreign-video', synchronizationId: 'sync:foreign-video', currentTimeMs: 500 }, foreignSender));
 
     expect(screen.getByRole('alert')).toHaveTextContent('Open an available YouTube tab to load captions.');
     expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
@@ -1242,21 +1095,21 @@ describe('App history actions', () => {
     const listener = registeredListeners[0];
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-1', startMs: 0, endMs: 1000, text: 'First cue.' },
           { id: 'cue-2', startMs: 1000, endMs: 2000, text: 'Second cue.' },
         ],
       },
     }));
-    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 1500 }));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', synchronizationId: 'sync:video-1', currentTimeMs: 1500 }));
 
     expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-2');
   });
@@ -1267,25 +1120,26 @@ describe('App history actions', () => {
     const listener = registeredListeners[0];
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First sentence.' },
           { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Current sentence.' },
           { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Future sentence.' },
         ],
       },
     }));
-    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 1_500 }));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', synchronizationId: 'sync:video-1', currentTimeMs: 1_500 }));
     await act(async () => listener({
       type: 'CAPTION_PROGRESS_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       progress: {
         capturedAtMs: 1_500,
         cues: [{ id: 'rendered-1', startMs: 1_400, endMs: 1_900, text: 'Current' }],
@@ -1299,6 +1153,7 @@ describe('App history actions', () => {
     await act(async () => listener({
       type: 'CAPTION_PROGRESS_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       progress: {
         capturedAtMs: 1_500,
         cues: [{ id: 'rendered-2', startMs: 1_500, endMs: 1_900, text: 'Unrelated' }],
@@ -1315,21 +1170,21 @@ describe('App history actions', () => {
     const listener = registeredListeners[0];
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en-visible',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-1', startMs: 0, endMs: 4000, text: 'Earlier rolling cue.' },
           { id: 'cue-2', startMs: 2000, endMs: 6000, text: 'Latest rolling cue.' },
         ],
       },
     }));
-    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 2500 }));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', synchronizationId: 'sync:video-1', currentTimeMs: 2500 }));
 
     expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-2');
   });
@@ -1338,17 +1193,19 @@ describe('App history actions', () => {
     let onActivated: ((activeInfo: { tabId: number; windowId: number }) => void) | undefined;
     const query = vi.fn().mockResolvedValue([{ id: 1 }]);
     const sendMessage = vi.fn((tabId: number) => Promise.resolve(tabId === 1 ? {
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-a',
+      synchronizationId: 'video-a',
       videoTitle: 'Video A',
       videoUrl: 'https://youtube.test/watch?v=video-a',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-a', startMs: 0, endMs: 1000, text: 'Caption from A.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-a', startMs: 0, endMs: 1000, text: 'Caption from A.' }] },
     } : {
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-b',
+      synchronizationId: 'video-b',
       videoTitle: 'Video B',
       videoUrl: 'https://youtube.test/watch?v=video-b',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-b', startMs: 0, endMs: 1000, text: 'Caption from B.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-b', startMs: 0, endMs: 1000, text: 'Caption from B.' }] },
     }));
     Object.assign(globalThis.chrome, {
       tabs: {
@@ -1369,11 +1226,12 @@ describe('App history actions', () => {
 
     const listener = registeredListeners[0];
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'stale-a',
+      synchronizationId: 'sync:stale-a',
       videoTitle: 'Stale A',
       videoUrl: 'https://youtube.test/watch?v=stale-a',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'stale-a', startMs: 0, endMs: 1000, text: 'Stale caption from A.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'stale-a', startMs: 0, endMs: 1000, text: 'Stale caption from A.' }] },
     }, { tab: { id: 1 } } as chrome.runtime.MessageSender));
 
     expect(screen.queryByText('Stale caption from A.')).not.toBeInTheDocument();
@@ -1392,11 +1250,12 @@ describe('App history actions', () => {
       if (message.type === 'REPLAY_RANGE') return Promise.resolve(undefined);
       if (tabId === 1) return oldState;
       return Promise.resolve({
-        type: 'CAPTIONS_UPDATED',
+        type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
         videoId: 'video-b',
+        synchronizationId: 'video-b',
         videoTitle: 'Video B',
         videoUrl: 'https://youtube.test/watch?v=video-b',
-        track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-b', startMs: 1000, endMs: 2000, text: 'Caption from B.' }] },
+        track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-b', startMs: 1000, endMs: 2000, text: 'Caption from B.' }] },
     });
   });
 
@@ -1418,27 +1277,29 @@ describe('App history actions', () => {
 
     await act(async () => resolveInitialQuery([{ id: 1 }]));
     await act(async () => resolveOldState?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-a',
+      synchronizationId: 'video-a',
       videoTitle: 'Video A',
       videoUrl: 'https://youtube.test/watch?v=video-a',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-a', startMs: 1000, endMs: 2000, text: 'Caption from A.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-a', startMs: 1000, endMs: 2000, text: 'Caption from A.' }] },
     }));
 
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
-    expect(sendMessage).toHaveBeenCalledWith(2, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
+    expect(sendMessage).toHaveBeenCalledWith(2, { type: 'REPLAY_RANGE', videoId: 'video-b', synchronizationId: 'video-b', startMs: 1_000, endMs: 2_000 });
   });
 
   it('binds an owned panel to its tab without querying or listening for activation', async () => {
     window.history.replaceState({}, '', '/?tabId=42');
     const query = vi.fn().mockResolvedValue([]);
     const sendMessage = vi.fn().mockResolvedValue({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'owner-video',
+      synchronizationId: 'owner-video',
       videoTitle: 'Owner video',
       videoUrl: 'https://youtube.test/watch?v=owner-video',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'owner-cue', startMs: 0, endMs: 1000, text: 'Caption from owner.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'owner-cue', startMs: 0, endMs: 1000, text: 'Caption from owner.' }] },
     });
     const activated = { addListener: vi.fn(), removeListener: vi.fn() };
     Object.assign(globalThis.chrome, { tabs: { query, sendMessage, onActivated: activated } });
@@ -1452,11 +1313,12 @@ describe('App history actions', () => {
 
     const listener = registeredListeners[0];
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'foreign-video',
+      synchronizationId: 'sync:foreign-video',
       videoTitle: 'Foreign video',
       videoUrl: 'https://youtube.test/watch?v=foreign-video',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'foreign-cue', startMs: 0, endMs: 1000, text: 'Caption from foreign tab.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'foreign-cue', startMs: 0, endMs: 1000, text: 'Caption from foreign tab.' }] },
     }, { tab: { id: 43 } } as chrome.runtime.MessageSender));
 
     expect(screen.queryByText('Caption from foreign tab.')).not.toBeInTheDocument();
@@ -1470,11 +1332,12 @@ describe('App history actions', () => {
     const sendMessage = vi.fn((tabId: number, message: { type: string }) => {
       if (message.type === 'REPLAY_RANGE') return Promise.resolve(undefined);
       return Promise.resolve({
-        type: 'CAPTIONS_UPDATED',
+        type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
         videoId: 'owner-video',
+        synchronizationId: 'owner-video',
         videoTitle: 'Owner video',
         videoUrl: 'https://youtube.test/watch?v=owner-video',
-        track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'owner-cue', startMs: 1000, endMs: 2000, text: 'Caption from owner.' }] },
+        track: { language: 'en', isEnglish: true, cues: [{ id: 'owner-cue', startMs: 1000, endMs: 2000, text: 'Caption from owner.' }] },
       });
     });
     const activated = { addListener: vi.fn(), removeListener: vi.fn() };
@@ -1487,11 +1350,11 @@ describe('App history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
 
     expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' });
-    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REPLAY_RANGE', videoId: 'owner-video', synchronizationId: 'owner-video', startMs: 1_000, endMs: 2_000 });
     expect(query).not.toHaveBeenCalled();
 
     unmount();
-    expect(globalThis.chrome.runtime.onMessage.removeListener).toHaveBeenCalledWith(registeredListeners[0]);
+    expect(globalThis.chrome.runtime.onMessage.removeListener).toHaveBeenCalledWith(runtimeMessageListener);
     expect(globalThis.chrome.storage.onChanged.removeListener).toHaveBeenCalledOnce();
     expect(activated.removeListener).not.toHaveBeenCalled();
   });
@@ -1506,26 +1369,28 @@ describe('App history actions', () => {
     const sender = { tab: { id: 42 } } as chrome.runtime.MessageSender;
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-a',
+      synchronizationId: 'sync:video-a',
       videoTitle: 'Video A',
       videoUrl: 'https://youtube.test/watch?v=video-a',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-a', startMs: 0, endMs: 1000, text: 'Caption from A.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-a', startMs: 0, endMs: 1000, text: 'Caption from A.' }] },
     }, sender));
-    await act(async () => listener({ type: 'VIDEO_CHANGED', videoId: 'video-b', videoTitle: 'Video B', videoUrl: 'https://youtube.test/watch?v=video-b' }, sender));
+    await act(async () => listener({ type: 'VIDEO_CHANGED', videoId: 'video-b', synchronizationId: 'sync:video-b', videoTitle: 'Video B', videoUrl: 'https://youtube.test/watch?v=video-b' }, sender));
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-b',
+      synchronizationId: 'sync:video-b',
       videoTitle: 'Video B',
       videoUrl: 'https://youtube.test/watch?v=video-b',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-b', startMs: 0, endMs: 1000, text: 'Caption from B.' }] },
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-b', startMs: 0, endMs: 1000, text: 'Caption from B.' }] },
     }, sender));
 
     expect(screen.queryByText('Caption from A.')).not.toBeInTheDocument();
     expect(screen.getByText('Caption from B.')).toBeInTheDocument();
   });
 
-  it('isolates rendered progress across 20 same-tab video switches', async () => {
+  it('rejects stale same-video snapshots and messages after a new synchronization identity', async () => {
     const query = vi.fn().mockResolvedValue([{ id: 42 }]);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
@@ -1535,46 +1400,166 @@ describe('App history actions', () => {
     const sender = { tab: { id: 42 } } as chrome.runtime.MessageSender;
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'VIDEO_CHANGED',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+    }, sender));
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+                cues: [{ id: 'old-cue', startMs: 0, endMs: 1_000, text: 'Old transcript.' }],
+      },
+    }, sender));
+    fireEvent.click(screen.getByRole('button', { name: 'Select transcript text' }));
+
+    await act(async () => listener({
+      type: 'VIDEO_CHANGED',
+      videoId: 'video-1',
+      synchronizationId: 'sync-2',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+    }, sender));
+    expect(screen.getByTestId('transcript-cues')).toBeEmptyDOMElement();
+    expect(screen.queryByRole('dialog', { name: 'English learning assistant' })).not.toBeInTheDocument();
+    expect(screen.getByText('正在載入完整英文字幕…')).toBeVisible();
+
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+      videoId: 'video-1',
+      synchronizationId: 'sync-2',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+                cues: [{ id: 'new-cue', startMs: 0, endMs: 1_000, text: 'New transcript.' }],
+      },
+    }, sender));
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+                cues: [{ id: 'late-cue', startMs: 0, endMs: 1_000, text: 'Late old transcript.' }],
+      },
+    }, sender));
+    await act(async () => listener({
+      type: 'CAPTION_DIAGNOSTIC',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      diagnostic: {
+        stage: 'timedtext-download',
+        status: 'error',
+        code: 'LATE_OLD_ERROR',
+        message: 'Late old error.',
+      },
+    }, sender));
+    await act(async () => listener({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      progress: {
+        capturedAtMs: 0,
+        cues: [{ id: 'late-progress', startMs: 0, endMs: 500, text: 'Late progress.' }],
+        activeGroup: { cueIds: ['late-progress'], startMs: 0 },
+      },
+    }, sender));
+    await act(async () => runtimeMessageListener?.({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+                cues: [{ id: 'identityless-cue', startMs: 0, endMs: 1_000, text: 'Identityless transcript.' }],
+      },
+    } as ContentMessage, sender));
+
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('New transcript.');
+    expect(screen.getByTestId('transcript-cues')).not.toHaveTextContent(/Old|Late|Identityless/);
+    expect(screen.queryByText('Late old error.')).not.toBeInTheDocument();
+    expect(screen.getByText(readyLifecycle.message)).toBeVisible();
+  });
+  it('isolates text, error, selection, and progress across 20 same-tab video switches', async () => {
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    render(<App />);
+    await waitFor(() => expect(registeredListeners).toHaveLength(1));
+    const listener = registeredListeners[0];
+    const sender = { tab: { id: 42 } } as chrome.runtime.MessageSender;
+
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-0',
+      synchronizationId: 'video-0',
       videoTitle: 'Video 0',
       videoUrl: 'https://youtube.test/watch?v=video-0',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [{ id: 'cue-0', startMs: 0, endMs: 2_000, text: 'Video 0 complete.' }],
+                cues: [{ id: 'cue-0', startMs: 0, endMs: 2_000, text: 'Video 0 complete.' }],
+      },
+    }, sender));
+    fireEvent.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    await act(async () => listener({
+      type: 'CAPTION_DIAGNOSTIC',
+      videoId: 'video-0',
+      synchronizationId: 'video-0',
+      diagnostic: {
+        stage: 'timedtext-download',
+        status: 'error',
+        code: 'OLD_ERROR_0',
+        message: 'Old error 0',
       },
     }, sender));
 
     for (let index = 1; index <= 20; index += 1) {
       const previousIndex = index - 1;
+      const videoId = `video-${index}`;
+      const synchronizationId = videoId;
       await act(async () => listener({
         type: 'VIDEO_CHANGED',
-        videoId: `video-${index}`,
+        videoId,
+        synchronizationId,
         videoTitle: `Video ${index}`,
-        videoUrl: `https://youtube.test/watch?v=video-${index}`,
+        videoUrl: `https://youtube.test/watch?v=${videoId}`,
       }, sender));
       await act(async () => listener({
-        type: 'CAPTIONS_UPDATED',
-        videoId: `video-${index}`,
+        type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+        videoId,
+        synchronizationId,
         videoTitle: `Video ${index}`,
-        videoUrl: `https://youtube.test/watch?v=video-${index}`,
+        videoUrl: `https://youtube.test/watch?v=${videoId}`,
         track: {
           language: 'en',
           isEnglish: true,
-          source: 'timedtext',
-          cues: [{ id: `cue-${index}`, startMs: 0, endMs: 2_000, text: `Video ${index} complete.` }],
+                    cues: [{ id: `cue-${index}`, startMs: 0, endMs: 2_000, text: `Video ${index} complete.` }],
         },
       }, sender));
       await act(async () => listener({
         type: 'PLAYBACK_UPDATED',
-        videoId: `video-${index}`,
+        videoId,
+        synchronizationId,
         currentTimeMs: 1_000,
       }, sender));
       await act(async () => listener({
         type: 'CAPTION_PROGRESS_UPDATED',
-        videoId: `video-${index}`,
+        videoId,
+        synchronizationId,
         progress: {
           capturedAtMs: 1_000,
           cues: [{ id: `rendered-${index}`, startMs: 900, endMs: 1_500, text: `Video ${index}` }],
@@ -1584,17 +1569,57 @@ describe('App history actions', () => {
       await act(async () => listener({
         type: 'CAPTION_PROGRESS_UPDATED',
         videoId: `video-${previousIndex}`,
+        synchronizationId: `video-${previousIndex}`,
         progress: {
           capturedAtMs: 1_000,
           cues: [{ id: `stale-${previousIndex}`, startMs: 900, endMs: 1_500, text: 'Stale progress' }],
           activeGroup: { cueIds: [`stale-${previousIndex}`], startMs: 900 },
         },
       }, sender));
+      await act(async () => listener({
+        type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+        videoId: `video-${previousIndex}`,
+        synchronizationId: `video-${previousIndex}`,
+        videoTitle: `Video ${previousIndex}`,
+        videoUrl: `https://youtube.test/watch?v=video-${previousIndex}`,
+        track: {
+          language: 'en',
+          isEnglish: true,
+                    cues: [{ id: `stale-text-${previousIndex}`, startMs: 0, endMs: 2_000, text: 'Stale previous text' }],
+        },
+      }, sender));
+      await act(async () => listener({
+        type: 'CAPTION_DIAGNOSTIC',
+        videoId: `video-${previousIndex}`,
+        synchronizationId: `video-${previousIndex}`,
+        diagnostic: {
+          stage: 'timedtext-download',
+          status: 'error',
+          code: `STALE_ERROR_${previousIndex}`,
+          message: 'Stale previous error',
+        },
+      }, sender));
+      if (index < 20) {
+        fireEvent.click(screen.getByRole('button', { name: 'Select transcript text' }));
+        await act(async () => listener({
+          type: 'CAPTION_DIAGNOSTIC',
+          videoId,
+          synchronizationId,
+          diagnostic: {
+            stage: 'timedtext-download',
+            status: 'error',
+            code: `OLD_ERROR_${index}`,
+            message: `Old error ${index}`,
+          },
+        }, sender));
+      }
     }
 
     expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-20');
     expect(screen.getByTestId('transcript-cues')).toHaveTextContent('Video 20');
-    expect(screen.getByTestId('transcript-cues')).not.toHaveTextContent('Stale progress');
+    expect(screen.getByTestId('transcript-cues')).not.toHaveTextContent(/Stale/);
+    expect(screen.queryByText(/Old error|Stale previous error/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: 'English learning assistant' })).not.toBeInTheDocument();
   });
 
   it('ignores playback from a video other than the selected video', async () => {
@@ -1603,15 +1628,15 @@ describe('App history actions', () => {
     const listener = registeredListeners[0];
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED', videoId: 'video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'First cue.' }] },
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle, videoId: 'video-1', synchronizationId: 'sync:video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'First cue.' }] },
     }));
-    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-2', currentTimeMs: 500 }));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-2', synchronizationId: 'sync:video-2', currentTimeMs: 500 }));
 
     expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
   });
 
-  it('shows immediate rendered progress while the visible-DOM transcript catches up', async () => {
+  it('uses rendered progress only to refine a current full-track row', async () => {
     render(<App />);
     await waitFor(() => expect(registeredListeners).toHaveLength(1));
     const listener = registeredListeners[0];
@@ -1619,39 +1644,51 @@ describe('App history actions', () => {
     await act(async () => listener({
       type: 'VIDEO_CHANGED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
     }));
     await act(async () => listener({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+      videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+                cues: [{
+          id: 'timedtext-current',
+          startMs: 29_000,
+          endMs: 33_000,
+          text: 'National League guy, Almost complete',
+        }],
+      },
+    }));
+    await act(async () => listener({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
+      currentTimeMs: 29_200,
+    }));
+    await act(async () => listener({
       type: 'CAPTION_PROGRESS_UPDATED',
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       progress: {
         capturedAtMs: 29_200,
         cues: [{
           id: 'progress-0',
           startMs: 29_000,
           endMs: 29_201,
-          text: 'National League guy,.....Almost',
+          text: 'National League guy, Almost',
         }],
         activeGroup: { cueIds: ['progress-0'], startMs: 29_000 },
       },
     }));
-    await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      videoTitle: 'Video one',
-      videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: {
-        language: 'en-visible',
-        isEnglish: true,
-        source: 'visible-dom',
-        cues: [{ id: 'visible-delayed', startMs: 29_000, endMs: 33_000, text: 'I' }],
-        activeGroup: { cueIds: ['visible-delayed'], startMs: 29_000 },
-      },
-    }));
 
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-delayed:0');
-    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('National League guy,.....Almost');
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('National League guy, Almost');
+    expect(screen.getByTestId('transcript-cues')).not.toHaveTextContent('complete');
   });
 
   it('does not let rendered progress claim a video before its Caption Track arrives', async () => {
@@ -1662,6 +1699,7 @@ describe('App history actions', () => {
     await act(async () => listener({
       type: 'CAPTION_PROGRESS_UPDATED',
       videoId: 'stale-video',
+      synchronizationId: 'sync:stale-video',
       progress: {
         capturedAtMs: 0,
         cues: [{ id: 'stale-progress', startMs: 0, endMs: 1_000, text: 'Stale progress.' }],
@@ -1669,15 +1707,15 @@ describe('App history actions', () => {
       },
     }));
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First cue.' }],
+                cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First cue.' }],
       },
     }));
 
@@ -1690,16 +1728,25 @@ describe('App history actions', () => {
     const listener = registeredListeners[0];
 
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED', videoId: 'video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'First cue.' }] },
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle, videoId: 'video-1', synchronizationId: 'sync:video-1', videoTitle: 'Video one', videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'First cue.' }] },
     }));
     await act(async () => listener({
-      type: 'CAPTIONS_UPDATED', videoId: 'video-2', videoTitle: 'Video two', videoUrl: 'https://youtube.test/watch?v=video-2',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'stale-cue', startMs: 0, endMs: 1000, text: 'Stale cue.' }] },
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle, videoId: 'video-2', synchronizationId: 'sync:video-2', videoTitle: 'Video two', videoUrl: 'https://youtube.test/watch?v=video-2',
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'stale-cue', startMs: 0, endMs: 1000, text: 'Stale cue.' }] },
     }));
-    await act(async () => listener({ type: 'VIDEO_CHANGED', videoId: 'video-2', videoTitle: 'Video two', videoUrl: 'https://youtube.test/watch?v=video-2' }));
-    await act(async () => listener({ type: 'NO_CAPTIONS', videoId: 'video-2', reason: 'not-found' }));
-    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 500 }));
+    await act(async () => listener({ type: 'VIDEO_CHANGED', videoId: 'video-2', synchronizationId: 'sync:video-2', videoTitle: 'Video two', videoUrl: 'https://youtube.test/watch?v=video-2' }));
+    await act(async () => listener({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId: 'video-2',
+      synchronizationId: 'sync:video-2',
+      lifecycle: {
+        status: 'no-english-track',
+        message: 'No English track.',
+        action: 'enable-english-cc',
+      },
+    }));
+    await act(async () => listener({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', synchronizationId: 'sync:video-1', currentTimeMs: 500 }));
 
     expect(screen.getByTestId('current-cues')).toHaveTextContent('cue-1');
     expect(screen.queryByText('No English captions are available for this video.')).not.toBeInTheDocument();
@@ -1709,15 +1756,15 @@ describe('App history actions', () => {
     const user = userEvent.setup();
     render(<App />);
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED',
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
       videoId: 'video-1',
+      synchronizationId: 'sync:video-1',
       videoTitle: 'Video one',
       videoUrl: 'https://youtube.test/watch?v=video-1',
       track: {
         language: 'en',
         isEnglish: true,
-        source: 'timedtext',
-        cues: [
+                cues: [
           { id: 'cue-3', startMs: 2000, endMs: 3000, text: 'Third cue.' },
           { id: 'cue-1', startMs: 0, endMs: 1000, text: 'First cue.' },
           { id: 'cue-2', startMs: 1000, endMs: 2000, text: 'Second cue.' },
@@ -1738,6 +1785,92 @@ describe('App history actions', () => {
     }), expect.objectContaining({ subtitlePosition: { startMs: 1000, endMs: 2000 } })));
   });
 
+  it('presents exactly one Loading, Ready, Retryable Error, or No English Track state', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const { container } = render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    const listener = registeredListeners[0];
+    const sender = { tab: { id: 42 } } as chrome.runtime.MessageSender;
+
+    await act(async () => listener({
+      type: 'VIDEO_CHANGED',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+    }, sender));
+    expect(container.querySelector('[data-caption-state]')).toHaveAttribute('data-caption-state', 'loading');
+    expect(screen.getByText('正在載入完整英文字幕…')).toBeVisible();
+
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle,
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+                cues: [{ id: 'ready-cue', startMs: 0, endMs: 1_000, text: 'Ready transcript.' }],
+      },
+    }, sender));
+    expect(container.querySelector('[data-caption-state]')).toHaveAttribute('data-caption-state', 'ready');
+    expect(screen.getByText(readyLifecycle.message)).toBeVisible();
+    expect(screen.queryByText('正在載入完整英文字幕…')).not.toBeInTheDocument();
+    await act(async () => listener({
+      type: 'CAPTION_DIAGNOSTIC',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      diagnostic: {
+        stage: 'player-response',
+        status: 'running',
+        message: 'Transient loading diagnostic.',
+      },
+    }, sender));
+    expect(screen.getByText('Transient loading diagnostic.')).toBeInTheDocument();
+
+    await act(async () => listener({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      lifecycle: {
+        status: 'retryable-error',
+        code: 'CAPTION_FETCH_FAILED',
+        message: '完整字幕下載失敗。',
+        action: 'retry',
+      },
+    }, sender));
+    expect(container.querySelector('[data-caption-state]')).toHaveAttribute('data-caption-state', 'retryable-error');
+    expect(screen.getByRole('alert')).toHaveTextContent('完整字幕下載失敗。');
+    expect(screen.getByTestId('transcript-cues')).toBeEmptyDOMElement();
+    expect(screen.queryByText('Transient loading diagnostic.')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '重新抓取字幕' }));
+    expect(sendMessage).toHaveBeenCalledWith(42, {
+      type: 'RETRY_CAPTIONS',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+    });
+    expect(container.querySelector('[data-caption-state]')).toHaveAttribute('data-caption-state', 'loading');
+
+    await act(async () => listener({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId: 'video-1',
+      synchronizationId: 'sync-1',
+      lifecycle: {
+        status: 'no-english-track',
+        message: '這部影片目前沒有可用的英文字幕軌。',
+        action: 'enable-english-cc',
+      },
+    }, sender));
+    expect(container.querySelector('[data-caption-state]')).toHaveAttribute('data-caption-state', 'no-english-track');
+    expect(screen.getByText(/請在 YouTube 開啟英文 CC/)).toBeVisible();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
   it('displays a history warning while keeping an unsaved result non-favoritable', async () => {
     const user = userEvent.setup();
     vi.mocked(messageClient.runQuery).mockResolvedValueOnce({
@@ -1747,8 +1880,8 @@ describe('App history actions', () => {
     });
     render(<App />);
     await act(async () => onMessage?.({
-      type: 'CAPTIONS_UPDATED', videoId: 'video-1', videoTitle: 'Video one', videoUrl: 'https://www.youtube.com/watch?v=video-1',
-      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
+      type: 'CAPTIONS_UPDATED', lifecycle: readyLifecycle, videoId: 'video-1', synchronizationId: 'sync:video-1', videoTitle: 'Video one', videoUrl: 'https://www.youtube.com/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, cues: [{ id: 'cue-1', startMs: 0, endMs: 1000, text: 'A selected phrase.' }] },
     }));
 
     await user.click(screen.getByRole('button', { name: 'Select transcript text' }));

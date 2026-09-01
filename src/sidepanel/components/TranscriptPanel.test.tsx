@@ -318,8 +318,8 @@ describe('TranscriptPanel', () => {
     expect(onPlaybackAction).not.toHaveBeenCalled();
   });
 
-  it('explains when no English captions are available', () => {
-    render(<TranscriptPanel
+  it('defers empty-state wording to the exclusive caption lifecycle presenter', () => {
+    const { container } = render(<TranscriptPanel
       cues={[]}
       studySentences={[]}
       studySentenceIndexByProjectedId={{}}
@@ -329,7 +329,7 @@ describe('TranscriptPanel', () => {
       onPlaybackAction={vi.fn()}
     />);
 
-    expect(screen.getByText('No English captions are available.')).toBeInTheDocument();
+    expect(container).toBeEmptyDOMElement();
   });
 
   it('renders the supplied current neighborhood without reslicing it', () => {
