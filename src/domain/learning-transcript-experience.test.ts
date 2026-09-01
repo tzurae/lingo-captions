@@ -5,7 +5,6 @@ import { projectLearningTranscriptExperience } from './learning-transcript-exper
 const completeTrack: CaptionTrack = {
   language: 'en',
   isEnglish: true,
-  source: 'timedtext',
   cues: [
     { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First sentence.' },
     { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Current sentence.' },
@@ -273,31 +272,4 @@ describe('Learning Transcript Experience', () => {
     expect(experience.visibleCues.map((cue) => cue.id)).toEqual(['gap-1', 'gap-2', 'gap-3']);
   });
 
-  it('uses immediate rendered progress as current while a visible-DOM transcript catches up', () => {
-    const track: CaptionTrack = {
-      language: 'en-visible',
-      isEnglish: true,
-      source: 'visible-dom',
-      cues: [{ id: 'visible-delayed', startMs: 29_000, endMs: 33_000, text: 'I' }],
-      activeGroup: { cueIds: ['visible-delayed'], startMs: 29_000 },
-    };
-    const experience = projectLearningTranscriptExperience({
-      track,
-      playbackMs: 29_200,
-      renderedProgress: {
-        capturedAtMs: 29_200,
-        cues: [{
-          id: 'progress-0',
-          startMs: 29_000,
-          endMs: 29_201,
-          text: 'National League guy,.....Almost',
-        }],
-        activeGroup: { cueIds: ['progress-0'], startMs: 29_000 },
-      },
-    });
-
-    expect(experience.fullTranscript).toEqual(track.cues);
-    expect(experience.currentCueIds).toEqual(['progress-0']);
-    expect(experience.visibleCues.map((cue) => cue.text)).toEqual(['National League guy,.....Almost']);
-  });
 });

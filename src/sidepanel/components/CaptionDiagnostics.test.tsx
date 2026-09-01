@@ -35,15 +35,14 @@ describe('CaptionDiagnostics', () => {
     expect(screen.getByText('字幕診斷（1）').closest('details')).not.toHaveAttribute('open');
   });
 
-  it('collapses after fallback recovers and opens again for a new current error', () => {
+  it('opens from the current status rather than a recovered historical error', () => {
     const recoveredEntries = [
       { stage: 'timedtext-parse' as const, status: 'error' as const, message: '完整字幕解析失敗。' },
-      { stage: 'visible-dom' as const, status: 'fallback' as const, message: '改讀畫面字幕。' },
-      { stage: 'ready' as const, status: 'success' as const, message: '畫面字幕已可用。' },
+      { stage: 'ready' as const, status: 'success' as const, message: '完整字幕已可用。' },
     ];
     const { rerender } = render(<CaptionDiagnostics entries={recoveredEntries} />);
 
-    expect(screen.getByText('字幕診斷（3）').closest('details')).not.toHaveAttribute('open');
+    expect(screen.getByText('字幕診斷（2）').closest('details')).not.toHaveAttribute('open');
 
     rerender(<CaptionDiagnostics entries={[...recoveredEntries, {
       stage: 'timedtext-download',
@@ -51,6 +50,6 @@ describe('CaptionDiagnostics', () => {
       message: '目前字幕抓取失敗。',
     }]} />);
 
-    expect(screen.getByText('字幕診斷（4）').closest('details')).toHaveAttribute('open');
+    expect(screen.getByText('字幕診斷（3）').closest('details')).toHaveAttribute('open');
   });
 });

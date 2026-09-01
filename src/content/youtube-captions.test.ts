@@ -6,7 +6,6 @@ describe('parseCaptionTrack', () => {
     expect(parseCaptionTrack({ language, cues: [] })).toMatchObject({
       language,
       isEnglish: true,
-      source: 'timedtext',
       cues: [],
     });
   });

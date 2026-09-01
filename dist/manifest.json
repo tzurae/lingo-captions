@@ -23,7 +23,7 @@
   "content_scripts": [
     {
       "js": [
-        "assets/page-bridge.ts-loader-CIu9dl16.js"
+        "assets/page-bridge.ts-loader-BSJj-axX.js"
       ],
       "matches": [
         "https://www.youtube.com/*",
@@ -33,7 +33,7 @@
     },
     {
       "js": [
-        "assets/content-script.ts-loader-BApHasit.js"
+        "assets/content-script.ts-loader-DDQwzRkX.js"
       ],
       "matches": [
         "https://www.youtube.com/*",
@@ -48,9 +48,8 @@
         "https://www.youtube.com/*"
       ],
       "resources": [
-        "assets/page-bridge.ts-BnPZ8G8o.js",
-        "assets/caption-sentences-DpMqS0RL.js",
-        "assets/content-script.ts-bNo93wj_.js"
+        "assets/page-bridge.ts-B15by8GG.js",
+        "assets/content-script.ts-DpO51W8g.js"
       ],
       "use_dynamic_url": false
     }

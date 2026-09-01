@@ -152,9 +152,7 @@ export function TranscriptPanel({
     if (nextScrollTop < previousScrollTop) onBrowseEarlierTranscript?.();
   }
 
-  if (orderedCues.length === 0) {
-    return <p role="status">No English captions are available.</p>;
-  }
+  if (orderedCues.length === 0) return null;
 
   const renderCue = ({ cue, studySentenceIndex, state }: CueEntry) => {
     const sourceStudySentence = studySentenceSources[studySentenceIndex];

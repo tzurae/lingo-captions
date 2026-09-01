@@ -1,8 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ContentMessage } from '../domain/types';
+import type { ContentMessage, SidePanelContentMessage } from '../domain/types';
 
 const windowMessageListeners: EventListenerOrEventListenerObject[] = [];
-const documentNavigationListeners: EventListenerOrEventListenerObject[] = [];
+const documentRuntimeListeners: Array<{
+  type: string;
+  listener: EventListenerOrEventListenerObject;
+  options?: boolean | AddEventListenerOptions;
+}> = [];
 
 beforeEach(() => {
   const addWindowEventListener = window.addEventListener.bind(window);
@@ -21,7 +25,9 @@ beforeEach(() => {
     listener: EventListenerOrEventListenerObject,
     options?: boolean | AddEventListenerOptions,
   ) => {
-    if (type === 'yt-navigate-finish') documentNavigationListeners.push(listener);
+    if (type === 'yt-navigate-finish' || type === 'click' || type === 'keydown') {
+      documentRuntimeListeners.push({ type, listener, options });
+    }
     addDocumentEventListener(type, listener, options);
   }) as typeof document.addEventListener);
 });
@@ -32,8 +38,8 @@ afterEach(() => {
   windowMessageListeners.splice(0).forEach((listener) => {
     window.removeEventListener('message', listener);
   });
-  documentNavigationListeners.splice(0).forEach((listener) => {
-    document.removeEventListener('yt-navigate-finish', listener);
+  documentRuntimeListeners.splice(0).forEach(({ type, listener, options }) => {
+    document.removeEventListener(type, listener, options);
   });
   vi.restoreAllMocks();
 });
@@ -79,6 +85,7 @@ function dispatchPageBridgeResponse(
       videoId: request.videoId,
       requestVersion: request.requestVersion,
       playerResponse: matchingPlayerResponse,
+      captionSelection: { captionsEnabled: false },
       ...override,
     },
   });
@@ -96,6 +103,33 @@ function setPlayerResponseScript(response: object): void {
   document.body.append(script);
 }
 
+type CorrelatedSidePanelMessage = Exclude<SidePanelContentMessage, { type: 'REQUEST_STATE' }>;
+type WithoutSynchronization<T> = T extends unknown
+  ? Omit<T, 'videoId' | 'synchronizationId'>
+  : never;
+
+type SentMessageSpy = {
+  mock: { calls: Array<[ContentMessage]> };
+};
+
+function forCurrentSynchronization(
+  sendMessage: SentMessageSpy,
+  message: WithoutSynchronization<CorrelatedSidePanelMessage>,
+): CorrelatedSidePanelMessage {
+  const currentVideo = sendMessage.mock.calls
+    .map(([sent]) => sent as ContentMessage)
+    .filter((sent): sent is Extract<ContentMessage, { type: 'VIDEO_CHANGED' }> => (
+      sent.type === 'VIDEO_CHANGED'
+    ))
+    .at(-1);
+  if (!currentVideo) throw new Error('Current synchronization is missing');
+  return {
+    ...message,
+    videoId: currentVideo.videoId,
+    synchronizationId: currentVideo.synchronizationId,
+  } as CorrelatedSidePanelMessage;
+}
+
 async function loadContentScriptRuntime(options: {
   captionResponse?: object;
   waitForInitialResult?: boolean;
@@ -106,7 +140,7 @@ async function loadContentScriptRuntime(options: {
     options.sendMessageImpl ?? (() => undefined),
   );
   const postMessage = vi.fn();
-  let onMessage: ((message: unknown) => void) | undefined;
+  let onMessage: ((message: SidePanelContentMessage) => void) | undefined;
   const fetchMock = options.fetchImpl ?? vi.fn().mockResolvedValue({
     ok: options.captionResponse !== undefined,
     status: options.captionResponse === undefined ? 404 : 200,
@@ -117,7 +151,7 @@ async function loadContentScriptRuntime(options: {
       runtime: {
         sendMessage,
         onMessage: {
-          addListener: vi.fn((listener: (message: unknown) => void) => { onMessage = listener; }),
+          addListener: vi.fn((listener: (message: SidePanelContentMessage) => void) => { onMessage = listener; }),
           removeListener: vi.fn(),
         },
       },
@@ -130,9 +164,16 @@ async function loadContentScriptRuntime(options: {
   const module = await import('./content-script');
   await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'VIDEO_CHANGED' })));
   if (options.waitForInitialResult !== false) {
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: options.captionResponse === undefined ? 'NO_CAPTIONS' : 'CAPTIONS_UPDATED',
-    })));
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining(
+      options.captionResponse === undefined
+        ? {
+          type: 'CAPTION_LIFECYCLE_UPDATED',
+          lifecycle: expect.objectContaining({
+            status: expect.stringMatching(/^(retryable-error|no-english-track)$/),
+          }),
+        }
+        : { type: 'CAPTIONS_UPDATED' },
+    )));
   }
 
   return { module, onMessage, sendMessage, postMessage, fetchMock };
@@ -193,7 +234,6 @@ describe('content-script late-open state synchronization', () => {
       requestVersion: expect.any(Number),
     }), '*');
 
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'NO_CAPTIONS' })));
     sendMessage.mockClear();
     dispatchPageBridgeResponse(postMessage);
 
@@ -203,10 +243,302 @@ describe('content-script late-open state synchronization', () => {
     })));
     const timedTextMessage = sendMessage.mock.calls
       .map(([message]) => message as ContentMessage)
-      .find((message) => message.type === 'CAPTIONS_UPDATED' && message.track.source === 'timedtext');
+      .find((message) => message.type === 'CAPTIONS_UPDATED');
     expect(timedTextMessage?.type).toBe('CAPTIONS_UPDATED');
     if (timedTextMessage?.type !== 'CAPTIONS_UPDATED') throw new Error('Missing timed-text message');
-    expect(timedTextMessage.track).toMatchObject({ source: 'timedtext' });
+    expect(timedTextMessage.track).toMatchObject({ isEnglish: true });
+  });
+
+  it.each([
+    {
+      label: 'CC-on creator',
+      captionSelection: { captionsEnabled: true, activeTrack: { languageCode: 'en', vssId: '.en' } },
+      expectedUrl: 'https://captions.test/creator',
+      expectedProvenance: 'creator',
+      expectedReason: 'active',
+      tracks: [
+        { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+        { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
+      ],
+    },
+    {
+      label: 'CC-on automatic',
+      captionSelection: { captionsEnabled: true, activeTrack: { kind: 'asr', languageCode: 'en', vssId: 'a.en' } },
+      expectedUrl: 'https://captions.test/automatic',
+      expectedProvenance: 'automatic',
+      expectedReason: 'active',
+      tracks: [
+        { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
+        { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+      ],
+    },
+    {
+      label: 'CC-off last-known',
+      captionSelection: { captionsEnabled: false, activeTrack: { kind: 'asr', languageCode: 'en', vssId: 'a.en' } },
+      expectedUrl: 'https://captions.test/automatic',
+      expectedProvenance: 'automatic',
+      expectedReason: 'last-known',
+      tracks: [
+        { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
+        { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+      ],
+    },
+    {
+      label: 'CC-off creator fallback',
+      captionSelection: { captionsEnabled: false },
+      expectedUrl: 'https://captions.test/creator',
+      expectedProvenance: 'creator',
+      expectedReason: 'creator-fallback',
+      tracks: [
+        { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+        { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
+      ],
+    },
+    {
+      label: 'automatic-only fallback',
+      captionSelection: { captionsEnabled: false },
+      expectedUrl: 'https://captions.test/automatic',
+      expectedProvenance: 'automatic',
+      expectedReason: 'automatic-fallback',
+      tracks: [
+        { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+      ],
+    },
+  ])('applies the $label policy at the adapter-to-experience seam', async ({
+    captionSelection,
+    expectedProvenance,
+    expectedReason,
+    expectedUrl,
+    tracks,
+  }) => {
+    setVideoUrl();
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '<transcript><text start="0" dur="1">Expected full transcript</text></transcript>',
+    } as Response) as unknown as typeof fetch;
+    const { fetchMock, postMessage, sendMessage } = await loadContentScriptRuntime({
+      fetchImpl,
+      waitForInitialResult: false,
+    });
+
+    dispatchPageBridgeResponse(postMessage, {
+      playerResponse: {
+        videoDetails: { videoId: 'video-1' },
+        captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
+      },
+      captionSelection,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expectedUrl));
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_DIAGNOSTIC',
+      diagnostic: expect.objectContaining({
+        stage: 'track-policy',
+        status: 'success',
+        details: expect.objectContaining({
+          source: expectedProvenance,
+          selection: expectedReason,
+        }),
+      }),
+    })));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTIONS_UPDATED',
+      track: expect.objectContaining({
+        cues: [expect.objectContaining({ text: 'Expected full transcript' })],
+      }),
+    }));
+  });
+
+  it('reports No English Track instead of diverging from YouTube active wording', async () => {
+    setVideoUrl();
+    const { fetchMock, postMessage, sendMessage } = await loadContentScriptRuntime({
+      waitForInitialResult: false,
+    });
+
+    dispatchPageBridgeResponse(postMessage, {
+      playerResponse: {
+        videoDetails: { videoId: 'video-1' },
+        captions: {
+          playerCaptionsTracklistRenderer: {
+            captionTracks: [
+              { baseUrl: 'https://captions.test/creator-en', languageCode: 'en', vssId: '.en' },
+              { baseUrl: 'https://captions.test/creator-es', languageCode: 'es', vssId: '.es' },
+            ],
+          },
+        },
+      },
+      captionSelection: {
+        captionsEnabled: true,
+        activeTrack: { languageCode: 'es', vssId: '.es' },
+      },
+    });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_DIAGNOSTIC',
+      diagnostic: expect.objectContaining({
+        stage: 'track-policy',
+        code: 'ACTIVE_TRACK_NOT_ENGLISH',
+        details: expect.objectContaining({
+          activeLanguage: 'es',
+          action: 'select-english-cc',
+        }),
+      }),
+    })));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'no-english-track' }),
+    }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('shows Retryable Error when CC is on before active identity is discoverable', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const ccButton = document.createElement('button');
+    ccButton.className = 'ytp-subtitles-button';
+    ccButton.setAttribute('aria-pressed', 'true');
+    document.body.append(ccButton);
+    const { fetchMock, sendMessage } = await loadContentScriptRuntime({
+      waitForInitialResult: false,
+    });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_DIAGNOSTIC',
+      diagnostic: expect.objectContaining({
+        stage: 'track-policy',
+        code: 'ACTIVE_TRACK_MISSING',
+        details: expect.objectContaining({ action: 'retry' }),
+      }),
+    })));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'retryable-error' }),
+    }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('shows Retryable Error for an ambiguous partial English active reference', async () => {
+    setVideoUrl();
+    const { fetchMock, postMessage, sendMessage } = await loadContentScriptRuntime({
+      waitForInitialResult: false,
+    });
+    dispatchPageBridgeResponse(postMessage, {
+      playerResponse: {
+        videoDetails: { videoId: 'video-1' },
+        captions: {
+          playerCaptionsTracklistRenderer: {
+            captionTracks: [
+              { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
+              { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+            ],
+          },
+        },
+      },
+      captionSelection: {
+        captionsEnabled: true,
+        activeTrack: { languageCode: 'en' },
+      },
+    });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_DIAGNOSTIC',
+      diagnostic: expect.objectContaining({
+        stage: 'track-policy',
+        code: 'ACTIVE_TRACK_UNRESOLVED',
+        details: expect.objectContaining({ activeLanguage: 'en', action: 'retry' }),
+      }),
+    })));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'retryable-error' }),
+    }));
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('starts a new synchronization when YouTube changes the active Caption Track', async () => {
+    setVideoUrl();
+    const tracks = [
+      { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
+      { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+    ];
+    const playerResponseWithTracks = {
+      videoDetails: { videoId: 'video-1' },
+      captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
+    };
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => '<transcript><text start="0" dur="1">Full transcript</text></transcript>',
+    } as Response) as unknown as typeof fetch;
+    const { postMessage, sendMessage } = await loadContentScriptRuntime({
+      fetchImpl,
+      waitForInitialResult: false,
+    });
+    dispatchPageBridgeResponse(postMessage, {
+      playerResponse: playerResponseWithTracks,
+      captionSelection: {
+        captionsEnabled: true,
+        activeTrack: { languageCode: 'en', vssId: '.en' },
+      },
+    });
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledWith('https://captions.test/creator'));
+    const initialSynchronizationId = sendMessage.mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === 'VIDEO_CHANGED')?.synchronizationId;
+
+    const menuItem = document.createElement('button');
+    menuItem.className = 'ytp-menuitem';
+    document.body.append(menuItem);
+    vi.useFakeTimers();
+    try {
+      menuItem.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await vi.advanceTimersByTimeAsync(100);
+      const probeRequest = postMessage.mock.calls
+        .map(([message]) => message as Record<string, unknown>)
+        .filter((message) => message.type === 'REQUEST_PLAYER_RESPONSE')
+        .at(-1);
+      if (!probeRequest) throw new Error('Caption-selection probe request missing');
+
+      dispatchPageBridgeResponse(postMessage, {
+        playerResponse: playerResponseWithTracks,
+        captionSelection: {
+          captionsEnabled: true,
+          activeTrack: { kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+        },
+      });
+      await Promise.resolve();
+      const replacementRequest = postMessage.mock.calls
+        .map(([message]) => message as Record<string, unknown>)
+        .filter((message) => message.type === 'REQUEST_PLAYER_RESPONSE')
+        .at(-1);
+      expect(replacementRequest?.requestVersion).not.toBe(probeRequest.requestVersion);
+
+      dispatchPageBridgeResponse(postMessage, {
+        playerResponse: playerResponseWithTracks,
+        captionSelection: {
+          captionsEnabled: true,
+          activeTrack: { kind: 'asr', languageCode: 'en', vssId: 'a.en' },
+        },
+      });
+      await Promise.resolve();
+    } finally {
+      vi.useRealTimers();
+    }
+
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledWith('https://captions.test/automatic'));
+    const replacementSynchronization = sendMessage.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type === 'VIDEO_CHANGED')
+      .at(-1);
+    expect(replacementSynchronization?.synchronizationId).not.toBe(initialSynchronizationId);
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_DIAGNOSTIC',
+      diagnostic: expect.objectContaining({
+        stage: 'track-policy',
+        details: expect.objectContaining({ source: 'automatic', selection: 'active' }),
+      }),
+    })));
   });
 
   it('publishes rendered caption progress separately from a complete Caption Track', async () => {
@@ -221,7 +553,7 @@ describe('content-script late-open state synchronization', () => {
 
     const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'CAPTION_PROGRESS_UPDATED',
       videoId: 'video-1',
       progress: {
@@ -229,10 +561,10 @@ describe('content-script late-open state synchronization', () => {
         cues: [expect.objectContaining({ id: 'progress-0', text: 'Hello' })],
         activeGroup: { cueIds: ['progress-0'], startMs: 500 },
       },
-    }));
+    })));
     expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({ source: 'timedtext' }),
+      track: expect.objectContaining({ isEnglish: true }),
     }));
 
     sendMessage.mockClear();
@@ -311,7 +643,7 @@ describe('content-script late-open state synchronization', () => {
     expect(disconnectSpy).toHaveBeenCalled();
   });
 
-  it.each(['top-level video', 'nested video', 'request version'] as const)(
+  it.each(['top-level video', 'nested video', 'request version', 'active track shape'] as const)(
     'ignores a bridge response with mismatched %s',
     async (boundary) => {
       setVideoUrl();
@@ -325,7 +657,9 @@ describe('content-script late-open state synchronization', () => {
         ? { videoId: 'old-video' }
         : boundary === 'nested video'
           ? { playerResponse: { ...matchingPlayerResponse, videoDetails: { videoId: 'old-video' } } }
-          : { requestVersion: requestedVersion - 1 };
+          : boundary === 'active track shape'
+            ? { captionSelection: { captionsEnabled: true, activeTrack: { vssId: 1 } } }
+            : { requestVersion: requestedVersion - 1 };
 
       dispatchPageBridgeResponse(postMessage, override);
       await new Promise((resolve) => window.setTimeout(resolve, 200));
@@ -347,23 +681,21 @@ describe('content-script late-open state synchronization', () => {
     }
   });
 
-  it('processes an exact bridge response that arrives after the retry window', async () => {
+  it('rejects a bridge response after its synchronization has reached a terminal error', async () => {
     setVideoUrl();
     const { postMessage, sendMessage, fetchMock } = await loadContentScriptRuntime({
       captionResponse: matchingPlayerResponse,
       waitForInitialResult: false,
     });
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'NO_CAPTIONS' })));
-    sendMessage.mockClear();
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'retryable-error' }),
+    })));
+    const fetchCallCount = vi.mocked(fetchMock).mock.calls.length;
 
     dispatchPageBridgeResponse(postMessage);
 
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith('https://captions.test/video-1'));
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTIONS_UPDATED',
-      videoId: 'video-1',
-      track: expect.objectContaining({ source: 'timedtext' }),
-    })));
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallCount);
   });
 
   it('replays VIDEO_CHANGED and CAPTIONS_UPDATED for REQUEST_STATE', async () => {
@@ -378,14 +710,18 @@ describe('content-script late-open state synchronization', () => {
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'CAPTIONS_UPDATED', videoId: 'video-1' })));
   });
 
-  it('requests a fresh page player response when REQUEST_STATE refreshes an existing video', async () => {
+  it('starts a new correlated synchronization only for an explicit Retry action', async () => {
     setVideoUrl();
     setPlayerResponseScript(playerResponse);
     const { onMessage, postMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    const previousIdentity = sendMessage.mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === 'VIDEO_CHANGED')?.synchronizationId;
+    const retryMessage = forCurrentSynchronization(sendMessage, { type: 'RETRY_CAPTIONS' });
     postMessage.mockClear();
     sendMessage.mockClear();
 
-    onMessage?.({ type: 'REQUEST_STATE' });
+    onMessage?.(retryMessage);
 
     expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
       source: 'youtube-english-learning',
@@ -393,6 +729,11 @@ describe('content-script late-open state synchronization', () => {
       videoId: 'video-1',
       requestVersion: expect.any(Number),
     }), '*');
+    const nextIdentity = sendMessage.mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === 'VIDEO_CHANGED')?.synchronizationId;
+    expect(nextIdentity).toBeDefined();
+    expect(nextIdentity).not.toBe(previousIdentity);
   });
 
   it('uses only correlated player-response requests after YouTube navigation', async () => {
@@ -429,14 +770,9 @@ describe('content-script late-open state synchronization', () => {
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'CAPTIONS_UPDATED', videoId: 'video-1' })));
   });
 
-  it('does not let an older failed synchronization replace a newer complete caption track', async () => {
+  it('does not let an older failed synchronization replace a newer complete Caption Track', async () => {
     setVideoUrl();
     setPlayerResponseScript(playerResponse);
-    const visibleSegment = document.createElement('span');
-    visibleSegment.className = 'ytp-caption-segment';
-    visibleSegment.textContent = 'Stale visible caption';
-    document.body.append(visibleSegment);
-
     let resolveOlderFetch: (response: Response) => void = () => undefined;
     const olderFetch = new Promise<Response>((resolve) => { resolveOlderFetch = resolve; });
     const fetchImpl = vi.fn()
@@ -452,181 +788,98 @@ describe('content-script late-open state synchronization', () => {
     });
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1));
 
-    onMessage?.({ type: 'REQUEST_STATE' });
+    onMessage?.(forCurrentSynchronization(sendMessage, { type: 'RETRY_CAPTIONS' }));
     await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'CAPTIONS_UPDATED',
       track: expect.objectContaining({
-        language: 'en',
         cues: [expect.objectContaining({ text: 'Newest complete caption' })],
       }),
     })));
     sendMessage.mockClear();
 
     resolveOlderFetch({ ok: false, status: 500, text: async () => '' } as Response);
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-
-    expect(sendMessage).not.toHaveBeenCalled();
-
+    await olderFetch;
+    await Promise.resolve();
     onMessage?.({ type: 'REQUEST_STATE' });
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'retryable-error' }),
+    }));
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({ language: 'en' }),
-    })));
-    const replayedCaption = sendMessage.mock.calls
-      .map(([message]) => message)
-      .find((message) => message.type === 'CAPTIONS_UPDATED');
-    expect(replayedCaption).toEqual(expect.objectContaining({
       track: expect.objectContaining({
-        language: 'en',
         cues: [expect.objectContaining({ text: 'Newest complete caption' })],
       }),
     }));
   });
 
-  it('stops an active visible-caption fallback when a fresh complete track is loaded', async () => {
-    setVideoUrl();
-    const segment = document.createElement('span');
-    segment.className = 'ytp-caption-segment';
-    segment.textContent = 'Fallback before refresh';
-    document.body.append(segment);
-    const disconnectSpy = vi.spyOn(MutationObserver.prototype, 'disconnect');
-    const { onMessage, sendMessage } = await loadContentScriptRuntime({
-      captionResponse: playerResponse,
-      waitForInitialResult: false,
-    });
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({ language: 'en-visible' }),
-    })), { timeout: 2_000 });
-    disconnectSpy.mockClear();
-
-    setPlayerResponseScript(playerResponse);
-    onMessage?.({ type: 'REQUEST_STATE' });
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({ language: 'en' }),
-    })));
-    expect(disconnectSpy).toHaveBeenCalled();
-    sendMessage.mockClear();
-
-    segment.textContent = 'A stopped fallback must not publish this';
-    await new Promise((resolve) => window.setTimeout(resolve, 500));
-
-    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({ language: 'en-visible' }),
-    }));
-    disconnectSpy.mockRestore();
-  });
-
-  it('does not let an older message rejection stop the newest visible-caption fallback', async () => {
-    setVideoUrl();
-    const segment = document.createElement('span');
-    segment.className = 'ytp-caption-segment';
-    segment.textContent = 'First fallback caption';
-    document.body.append(segment);
-    let rejectOldMessage: (reason: Error) => void = () => undefined;
-    const oldMessage = new Promise<void>((_resolve, reject) => { rejectOldMessage = reject; });
-    let messageCount = 0;
-    const { onMessage, sendMessage } = await loadContentScriptRuntime({
-      captionResponse: playerResponse,
-      waitForInitialResult: false,
-      sendMessageImpl: () => {
-        messageCount += 1;
-        return messageCount === 1 ? oldMessage : undefined;
-      },
-    });
-    await vi.waitFor(() => expect(sendMessage.mock.calls.filter(([message]) => (
-      message.type === 'CAPTIONS_UPDATED' && message.track.language === 'en-visible'
-    ))).toHaveLength(1), { timeout: 2_000 });
-
-    onMessage?.({ type: 'REQUEST_STATE' });
-    await vi.waitFor(() => expect(sendMessage.mock.calls.filter(([message]) => (
-      message.type === 'CAPTIONS_UPDATED' && message.track.language === 'en-visible'
-    )).length).toBeGreaterThanOrEqual(3), { timeout: 2_000 });
-    sendMessage.mockClear();
-
-    rejectOldMessage(new Error('Older message channel closed'));
-    await Promise.resolve();
-    segment.textContent = 'Newest fallback is still active';
-
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({
-        language: 'en-visible',
-        cues: expect.arrayContaining([expect.objectContaining({
-          text: expect.stringContaining('Newest fallback is still active'),
-        })]),
-      }),
-    })), { timeout: 2_000 });
-
-    setPlayerResponseScript(playerResponse);
-    onMessage?.({ type: 'REQUEST_STATE' });
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTIONS_UPDATED',
-      track: expect.objectContaining({ language: 'en' }),
-    })));
-  });
-
-  it('captures captions already visible on the YouTube player when timedtext is unavailable', async () => {
+  it('keeps rendered DOM captions as current progress without creating a partial Learning Transcript', async () => {
     setVideoUrl();
     const video = document.createElement('video');
     Object.defineProperty(video, 'currentTime', { configurable: true, value: 10 });
-    const firstSegment = document.createElement('span');
-    firstSegment.className = 'ytp-caption-segment';
-    firstSegment.textContent = 'Visible English caption.';
-    const secondSegment = document.createElement('span');
-    secondSegment.className = 'ytp-caption-segment';
-    secondSegment.textContent = 'Second sentence.';
-    document.body.append(video, firstSegment, secondSegment);
+    const segment = document.createElement('span');
+    segment.className = 'ytp-caption-segment';
+    segment.textContent = 'Visible current caption.';
+    document.body.append(video, segment);
 
     const { sendMessage } = await loadContentScriptRuntime({ waitForInitialResult: false });
 
-    await vi.waitFor(() => expect(sendMessage.mock.calls.some(([message]) => (
-      message.type === 'CAPTIONS_UPDATED' && message.track.source === 'visible-dom'
-    ))).toBe(true));
-    const visibleMessage = sendMessage.mock.calls
-      .map(([message]) => message as ContentMessage)
-      .find((message) => message.type === 'CAPTIONS_UPDATED' && message.track.source === 'visible-dom');
-    expect(visibleMessage?.type).toBe('CAPTIONS_UPDATED');
-    if (visibleMessage?.type !== 'CAPTIONS_UPDATED') throw new Error('Missing visible-DOM message');
-    expect(visibleMessage).toMatchObject({
-      videoId: 'video-1',
-      track: {
-        language: 'en-visible',
-        source: 'visible-dom',
-        cues: [
-          expect.objectContaining({ id: 'visible-0', text: 'Visible English caption.' }),
-          expect.objectContaining({ id: 'visible-1', text: 'Second sentence.' }),
-        ],
-        activeGroup: { cueIds: ['visible-0', 'visible-1'], startMs: 10_000 },
-      },
-    });
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      progress: expect.objectContaining({
+        cues: [expect.objectContaining({ text: 'Visible current caption.' })],
+      }),
+    })));
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'retryable-error' }),
+    })));
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTIONS_UPDATED',
+    }));
   });
 
-  it('reports the exact caption pipeline stage before activating the visible-caption fallback', async () => {
+  it('publishes no partial rows or false Ready state after complete timedtext download fails', async () => {
     setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const { sendMessage } = await loadContentScriptRuntime({ waitForInitialResult: false });
+
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'retryable-error' }),
+    })));
+
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'CAPTIONS_UPDATED' }));
+    expect(sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      lifecycle: expect.objectContaining({ status: 'ready' }),
+    }));
+  });
+
+  it('reports the failure source and actionable Retry step', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
     const { sendMessage } = await loadContentScriptRuntime({ waitForInitialResult: false });
 
     await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'CAPTION_DIAGNOSTIC',
       videoId: 'video-1',
       diagnostic: expect.objectContaining({
-        stage: 'player-response',
+        stage: 'timedtext-download',
         status: 'error',
-        code: 'PLAYER_RESPONSE_MISSING',
+        code: 'CAPTION_FETCH_FAILED',
+        details: expect.objectContaining({
+          source: 'timedtext',
+          action: 'retry',
+        }),
       }),
     })));
-    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
-      type: 'CAPTION_DIAGNOSTIC',
-      diagnostic: expect.objectContaining({ stage: 'visible-dom', status: 'fallback' }),
-    })));
   });
-
-  it('replays VIDEO_CHANGED and NO_CAPTIONS for REQUEST_STATE', async () => {
+  it('replays VIDEO_CHANGED and No English Track lifecycle for REQUEST_STATE', async () => {
     setVideoUrl();
-    setPlayerResponseScript({ captions: {} });
+    setPlayerResponseScript({ videoDetails: { videoId: 'video-1' }, captions: {} });
     const video = document.createElement('video');
     document.body.append(video);
     const { onMessage, sendMessage } = await loadContentScriptRuntime();
@@ -634,10 +887,20 @@ describe('content-script late-open state synchronization', () => {
 
     onMessage?.({ type: 'REQUEST_STATE' });
 
-    const replayedState = sendMessage.mock.calls.map(([message]) => message).filter((message) => message.type !== 'CAPTION_DIAGNOSTIC');
+    const replayedState = sendMessage.mock.calls
+      .map(([message]) => message)
+      .filter((message) => message.type !== 'CAPTION_DIAGNOSTIC');
     expect(replayedState[0]).toEqual(expect.objectContaining({ type: 'VIDEO_CHANGED', videoId: 'video-1' }));
-    expect(replayedState[1]).toEqual(expect.objectContaining({ type: 'NO_CAPTIONS', videoId: 'video-1' }));
-    expect(replayedState[2]).toEqual({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 0 });
+    expect(replayedState[1]).toEqual(expect.objectContaining({
+      type: 'CAPTION_LIFECYCLE_UPDATED',
+      videoId: 'video-1',
+      lifecycle: expect.objectContaining({ status: 'no-english-track' }),
+    }));
+    expect(replayedState[2]).toEqual(expect.objectContaining({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 0,
+    }));
   });
 
   it('replays paused playback immediately even when playback throttling was just used', async () => {
@@ -655,7 +918,7 @@ describe('content-script late-open state synchronization', () => {
     const replayedState = sendMessage.mock.calls.map(([message]) => message).filter((message) => message.type !== 'CAPTION_DIAGNOSTIC');
     expect(replayedState[0]).toEqual(expect.objectContaining({ type: 'VIDEO_CHANGED', videoId: 'video-1' }));
     expect(replayedState[1]).toEqual(expect.objectContaining({ type: 'CAPTIONS_UPDATED', videoId: 'video-1' }));
-    expect(replayedState[2]).toEqual({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 12345 });
+    expect(replayedState.at(-1)).toEqual(expect.objectContaining({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 12345 }));
   });
 
   it.each([true, false])('jumps without changing a paused=%s playback intent', async (paused) => {
@@ -670,14 +933,21 @@ describe('content-script late-open state synchronization', () => {
     Object.defineProperty(video, 'pause', { configurable: true, value: pause });
     document.body.append(video);
     const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    const jumpMessage = forCurrentSynchronization(sendMessage, { type: 'JUMP_TO_HERE', timeMs: 500 });
     sendMessage.mockClear();
+    onMessage?.({
+      ...jumpMessage,
+      synchronizationId: `${jumpMessage.synchronizationId}:stale`,
+    });
+    expect(video.currentTime).toBe(12);
+    expect(sendMessage).not.toHaveBeenCalled();
 
-    onMessage?.({ type: 'JUMP_TO_HERE', timeMs: 500 });
+    onMessage?.(jumpMessage);
 
     expect(video.currentTime).toBe(0.5);
     expect(play).not.toHaveBeenCalled();
     expect(pause).not.toHaveBeenCalled();
-    expect(sendMessage).toHaveBeenCalledWith({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 500 });
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 500 }));
   });
 
   it('pauses and resumes Focused Study without seeking', async () => {
@@ -691,18 +961,20 @@ describe('content-script late-open state synchronization', () => {
     Object.defineProperty(video, 'pause', { configurable: true, value: pause });
     document.body.append(video);
     const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    const pauseMessage = forCurrentSynchronization(sendMessage, { type: 'PAUSE_PLAYBACK' });
+    const resumeMessage = forCurrentSynchronization(sendMessage, { type: 'RESUME_PLAYBACK' });
     sendMessage.mockClear();
 
-    onMessage?.({ type: 'PAUSE_PLAYBACK' });
+    onMessage?.(pauseMessage);
     expect(video.currentTime).toBe(12);
     expect(pause).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith({
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'PLAYBACK_UPDATED',
       videoId: 'video-1',
       currentTimeMs: 12_000,
-    });
+    }));
 
-    onMessage?.({ type: 'RESUME_PLAYBACK' });
+    onMessage?.(resumeMessage);
     expect(video.currentTime).toBe(12);
     expect(play).toHaveBeenCalledTimes(1);
   });
@@ -715,9 +987,9 @@ describe('content-script late-open state synchronization', () => {
     Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
     Object.defineProperty(video, 'play', { configurable: true, value: play });
     document.body.append(video);
-    const { onMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    onMessage?.({ type: 'PLAY_FROM_HERE', timeMs: 500 });
+    onMessage?.(forCurrentSynchronization(sendMessage, { type: 'PLAY_FROM_HERE', timeMs: 500 }));
 
     expect(video.currentTime).toBe(0.5);
     expect(play).toHaveBeenCalledTimes(1);
@@ -733,9 +1005,9 @@ describe('content-script late-open state synchronization', () => {
     Object.defineProperty(video, 'play', { configurable: true, value: play });
     Object.defineProperty(video, 'pause', { configurable: true, value: pause });
     document.body.append(video);
-    const { onMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    onMessage?.({ type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 });
+    onMessage?.(forCurrentSynchronization(sendMessage, { type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 }));
     expect(video.currentTime).toBe(0.5);
     expect(play).toHaveBeenCalledTimes(1);
     video.currentTime = 1.5;
@@ -756,17 +1028,16 @@ describe('content-script late-open state synchronization', () => {
     document.body.append(video);
     const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    onMessage?.({ type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 });
+    onMessage?.(forCurrentSynchronization(sendMessage, { type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 }));
     video.currentTime = 1.75;
     video.dispatchEvent(new Event('timeupdate'));
-
     expect(video.currentTime).toBe(1.5);
     expect(pause).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith({
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
       type: 'PLAYBACK_UPDATED',
       videoId: 'video-1',
       currentTimeMs: 1_500,
-    });
+    }));
   });
 
   it('cancels a Replay Range when YouTube navigation reuses the video element', async () => {
@@ -779,9 +1050,9 @@ describe('content-script late-open state synchronization', () => {
     Object.defineProperty(video, 'play', { configurable: true, value: play });
     Object.defineProperty(video, 'pause', { configurable: true, value: pause });
     document.body.append(video);
-    const { onMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
 
-    onMessage?.({ type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 });
+    onMessage?.(forCurrentSynchronization(sendMessage, { type: 'REPLAY_RANGE', startMs: 500, endMs: 1_500 }));
     document.dispatchEvent(new Event('yt-navigate-finish'));
     video.currentTime = 1.5;
     video.dispatchEvent(new Event('timeupdate'));
