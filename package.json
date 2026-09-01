@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "pretest:browser": "vite build",
     "test:browser": "playwright test --config=playwright.config.ts",
+    "test:package": "vitest run tests/production-dependency-bundle.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build": "vite build"

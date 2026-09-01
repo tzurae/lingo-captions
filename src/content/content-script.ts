@@ -8,7 +8,13 @@ import {
   type CaptionTrackSelectionReason,
 } from './caption-track-policy';
 import { createRenderedCaptionProgressMonitor, type RenderedCaptionProgressMonitor } from './rendered-caption-progress-monitor';
-import { parseCaptionTrack, type RawCaptionCue, type RawCaptionTrack } from './youtube-captions';
+import {
+  findPlayerCaptionRequestUrl,
+  parseCaptionJson3,
+  parseCaptionTrack,
+  type RawCaptionCue,
+  type RawCaptionTrack,
+} from './youtube-captions';
 
 type PlayerResponse = {
   videoDetails?: { videoId?: string };
@@ -382,10 +388,53 @@ function parseCaptionXml(xml: string): RawCaptionCue[] {
   });
 }
 
+type CaptionDownload = {
+  url: string;
+  format: 'json3' | 'xml';
+};
+
+function captionResourceUrls(): string[] {
+  if (typeof globalThis.performance?.getEntriesByType !== 'function') return [];
+  try {
+    return globalThis.performance.getEntriesByType('resource')
+      .map((entry) => entry.name)
+      .filter((name) => typeof name === 'string');
+  } catch {
+    return [];
+  }
+}
+
+async function resolveCaptionDownload(
+  track: CaptionTrackCandidate,
+  videoId: string,
+  captionsEnabled: boolean,
+): Promise<CaptionDownload | undefined> {
+  if (track.languageCode) {
+    const canObservePlayerRequests = typeof globalThis.performance?.getEntriesByType === 'function';
+    const attempts = captionsEnabled && canObservePlayerRequests ? 6 : 0;
+    for (let attempt = 0; attempt <= attempts; attempt += 1) {
+      const playerUrl = findPlayerCaptionRequestUrl(captionResourceUrls(), {
+        videoId,
+        languageCode: track.languageCode,
+        kind: track.kind,
+        trackBaseUrl: track.baseUrl,
+        vssId: track.vssId,
+        name: track.name,
+      });
+      if (playerUrl) return { url: playerUrl, format: 'json3' };
+      if (attempt < attempts) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+      }
+    }
+  }
+  return track.baseUrl ? { url: track.baseUrl, format: 'xml' } : undefined;
+}
+
 async function findEnglishCaptionTrack(
   response: PlayerResponse,
   captionSelection: CaptionSelectionResponse,
   lastKnownTrackId: string | null,
+  videoId: string,
 ): Promise<CaptionResult> {
   const tracks = response.captions?.playerCaptionsTracklistRenderer?.captionTracks;
   if (!tracks?.length) {
@@ -476,7 +525,12 @@ async function findEnglishCaptionTrack(
   }
 
   const trackId = getCaptionTrackIdentity(selection.track);
-  if (!selection.track.baseUrl) {
+  const download = await resolveCaptionDownload(
+    selection.track,
+    videoId,
+    captionSelection.captionsEnabled,
+  );
+  if (!download) {
     return {
       type: 'retryable-error',
       diagnostic: {
@@ -490,7 +544,7 @@ async function findEnglishCaptionTrack(
   }
 
   try {
-    const response = await fetch(selection.track.baseUrl);
+    const response = await fetch(download.url);
     if (!response.ok) {
       return {
         type: 'retryable-error',
@@ -499,12 +553,19 @@ async function findEnglishCaptionTrack(
           status: 'error',
           code: 'CAPTION_FETCH_FAILED',
           message: `完整字幕下載失敗（HTTP ${response.status || 'unknown'}）。`,
-          details: { httpStatus: response.status || 0, source: 'timedtext', action: 'retry' },
+          details: {
+            httpStatus: response.status || 0,
+            source: download.format === 'json3' ? 'youtube-player-json3' : 'timedtext',
+            action: 'retry',
+          },
         },
       };
     }
 
-    const cues = parseCaptionXml(await response.text());
+    const document = await response.text();
+    const cues = download.format === 'json3'
+      ? parseCaptionJson3(document)
+      : parseCaptionXml(document);
     if (!cues.length) {
       return {
         type: 'retryable-error',
@@ -513,7 +574,10 @@ async function findEnglishCaptionTrack(
           status: 'error',
           code: 'CAPTION_PARSE_EMPTY',
           message: '字幕檔下載成功，但完整內容為空。',
-          details: { source: 'timedtext', action: 'retry' },
+          details: {
+            source: download.format === 'json3' ? 'youtube-player-json3' : 'timedtext',
+            action: 'retry',
+          },
         },
       };
     }
@@ -536,7 +600,10 @@ async function findEnglishCaptionTrack(
         status: 'error',
         code: 'CAPTION_FETCH_EXCEPTION',
         message: `完整字幕下載發生錯誤：${reason instanceof Error ? reason.message : '未知錯誤'}`,
-        details: { source: 'timedtext', action: 'retry' },
+        details: {
+          source: download.format === 'json3' ? 'youtube-player-json3' : 'timedtext',
+          action: 'retry',
+        },
       },
     };
   }
@@ -796,6 +863,7 @@ async function synchronizeVideo(sendPlaybackAfter = false): Promise<void> {
     correlatedResponse.playerResponse,
     correlatedResponse.captionSelection,
     lastKnownTrack?.trackId ?? null,
+    videoId,
   );
   if (version !== synchronizationVersion
     || synchronizationId !== currentSynchronizationId
