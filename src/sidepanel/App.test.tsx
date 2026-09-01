@@ -1164,7 +1164,7 @@ describe('App history actions', () => {
     expect(screen.getByTestId('transcript-cues')).toHaveTextContent('First sentence. Current sentence. Future sentence.');
   });
 
-  it('selects the latest cue when fallback cue time ranges overlap', async () => {
+  it('uses the latest overlapping Study Sentence as the playback anchor', async () => {
     render(<App />);
     await waitFor(() => expect(registeredListeners).toHaveLength(1));
     const listener = registeredListeners[0];

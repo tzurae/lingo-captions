@@ -52,7 +52,7 @@ export function getCaptionTrackIdentity(track: CaptionTrackCandidate): string {
   ].join(':');
 }
 
-function provenanceOf(track: CaptionTrackCandidate): CaptionTrackProvenance {
+export function getCaptionTrackProvenance(track: CaptionTrackCandidate): CaptionTrackProvenance {
   const kind = track.kind?.trim().toLowerCase();
   const vssId = track.vssId?.trim().toLowerCase();
   const name = track.name?.trim().toLowerCase();
@@ -74,7 +74,7 @@ function selectionFor(
 ): CaptionTrackSelection | null {
   if (!trackId) return null;
   const track = tracks.find((candidate) => getCaptionTrackIdentity(candidate) === trackId);
-  return track ? { track, provenance: provenanceOf(track), reason } : null;
+  return track ? { track, provenance: getCaptionTrackProvenance(track), reason } : null;
 }
 
 function normalized(value: string | undefined): string | null {
@@ -109,7 +109,7 @@ function selectionForReference(
   if (!reference) return null;
   const matches = tracks.filter((candidate) => matchesTrackReference(candidate, reference));
   return matches.length === 1
-    ? { track: matches[0], provenance: provenanceOf(matches[0]), reason }
+    ? { track: matches[0], provenance: getCaptionTrackProvenance(matches[0]), reason }
     : null;
 }
 
@@ -132,7 +132,7 @@ export function selectEnglishCaptionTrack(
   }
 
   const creator = englishTracks
-    .filter((track) => provenanceOf(track) === 'creator')
+    .filter((track) => getCaptionTrackProvenance(track) === 'creator')
     .sort(byIdentity)[0];
   if (creator) return { track: creator, provenance: 'creator', reason: 'creator-fallback' };
 

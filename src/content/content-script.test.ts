@@ -42,6 +42,7 @@ afterEach(() => {
     document.removeEventListener(type, listener, options);
   });
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 const playerResponse = {
@@ -350,6 +351,55 @@ describe('content-script late-open state synchronization', () => {
     }));
   });
 
+  it('uses YouTube player JSON3 request to publish the complete active track', async () => {
+    setVideoUrl();
+    const playerRequestUrl = 'https://www.youtube.com/api/timedtext?v=video-1&lang=en&pot=player-token&fmt=json3';
+    vi.stubGlobal('performance', {
+      getEntriesByType: () => [{ name: playerRequestUrl }],
+    });
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        events: [
+          { tStartMs: 0, dDurationMs: 1_000, segs: [{ utf8: 'Real player caption.' }] },
+        ],
+      }),
+    } as Response) as unknown as typeof fetch;
+    const { postMessage, sendMessage } = await loadContentScriptRuntime({
+      fetchImpl,
+      waitForInitialResult: false,
+    });
+
+    dispatchPageBridgeResponse(postMessage, {
+      playerResponse: {
+        videoDetails: { videoId: 'video-1' },
+        captions: {
+          playerCaptionsTracklistRenderer: {
+            captionTracks: [{
+              baseUrl: 'https://captions.test/base-track',
+              languageCode: 'en',
+              vssId: '.en',
+            }],
+          },
+        },
+      },
+      captionSelection: {
+        captionsEnabled: true,
+        activeTrack: { languageCode: 'en', vssId: '.en' },
+      },
+    });
+
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledWith(playerRequestUrl));
+    expect(fetchImpl).not.toHaveBeenCalledWith('https://captions.test/base-track');
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'CAPTIONS_UPDATED',
+      track: expect.objectContaining({
+        cues: [{ id: 'json3-0', startMs: 0, endMs: 1_000, text: 'Real player caption.' }],
+      }),
+    })));
+  });
+
   it('reports No English Track instead of diverging from YouTube active wording', async () => {
     setVideoUrl();
     const { fetchMock, postMessage, sendMessage } = await loadContentScriptRuntime({
@@ -458,6 +508,7 @@ describe('content-script late-open state synchronization', () => {
 
   it('starts a new synchronization when YouTube changes the active Caption Track', async () => {
     setVideoUrl();
+    vi.stubGlobal('performance', {});
     const tracks = [
       { baseUrl: 'https://captions.test/creator', languageCode: 'en', vssId: '.en' },
       { baseUrl: 'https://captions.test/automatic', kind: 'asr', languageCode: 'en', vssId: 'a.en' },

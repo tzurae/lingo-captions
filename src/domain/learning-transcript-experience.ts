@@ -9,7 +9,6 @@ export type ProgressAlignmentFailure = {
 export type LearningTranscriptExperience = {
   fullTranscript: CaptionCue[];
   continuousViewingProjection: CaptionCue[];
-  visibleCues: CaptionCue[];
   currentSourceCueIds: string[];
   currentCueIds: string[];
   sourceCueIndexByProjectedId: Record<string, number>;
@@ -42,40 +41,15 @@ function sourceCueIndices(cues: CaptionCue[]): Record<string, number> {
   return Object.fromEntries(cues.map((cue, index) => [cue.id, index]));
 }
 
-function currentNeighborhood(
-  cues: CaptionCue[],
-  currentCueIds: string[],
-  playbackMs: number | null,
-): CaptionCue[] {
-  if (cues.length <= 3) return cues;
-  const currentIdSet = new Set(currentCueIds);
-  const currentIndices = cues.flatMap((cue, index) => currentIdSet.has(cue.id) ? [index] : []);
-  if (currentIndices.length > 0) {
-    const firstCurrent = currentIndices[0];
-    const lastCurrent = currentIndices.at(-1)!;
-    return cues.slice(Math.max(0, firstCurrent - 1), Math.min(cues.length, lastCurrent + 2));
-  }
-  if (playbackMs === null) return cues.slice(0, 3);
-
-  const nextIndex = cues.findIndex((cue) => cue.startMs > playbackMs);
-  if (nextIndex < 0) return cues.slice(-3);
-  const start = Math.max(0, nextIndex - 1);
-  const boundedStart = Math.min(start, cues.length - 3);
-  return cues.slice(boundedStart, boundedStart + 3);
-}
-
 function baseExperience(
   cues: CaptionCue[],
   currentCueIds: string[],
-  playbackMs: number | null,
   alignmentFailure?: ProgressAlignmentFailure,
 ): LearningTranscriptExperience {
-  const visibleCues = currentNeighborhood(cues, currentCueIds, playbackMs);
   const sourceIndices = sourceCueIndices(cues);
   return {
     fullTranscript: cues,
     continuousViewingProjection: cues,
-    visibleCues,
     currentSourceCueIds: currentCueIds,
     currentCueIds,
     sourceCueIndexByProjectedId: sourceIndices,
@@ -104,16 +78,16 @@ export function projectLearningTranscriptExperience({
   playbackMs: number | null;
   renderedProgress: RenderedCaptionProgress | null;
 }): LearningTranscriptExperience {
-  if (!track) return baseExperience([], [], playbackMs);
+  if (!track) return baseExperience([], []);
 
-  if (playbackMs === null) return baseExperience(track.cues, [], playbackMs);
+  if (playbackMs === null) return baseExperience(track.cues, []);
 
   const currentSourceCues = track.cues.filter(
     (cue) => cue.startMs <= playbackMs && playbackMs < cue.endMs,
   );
   const currentSourceCueIds = currentSourceCues.map((cue) => cue.id);
   if (!renderedProgress?.activeGroup || currentSourceCues.length === 0) {
-    return baseExperience(track.cues, currentSourceCueIds, playbackMs);
+    return baseExperience(track.cues, currentSourceCueIds);
   }
 
   const renderedById = new Map(renderedProgress.cues.map((cue) => [cue.id, cue]));
@@ -123,7 +97,7 @@ export function projectLearningTranscriptExperience({
   const currentText = currentSourceCues.map((cue) => cue.text).join(' ');
   const renderedText = renderedCues.map((cue) => cue.text).join(' ');
   if (renderedCues.length === 0) {
-    return baseExperience(track.cues, currentSourceCueIds, playbackMs, {
+    return baseExperience(track.cues, currentSourceCueIds, {
       reason: 'empty-progress',
       currentText,
       renderedText,
@@ -134,7 +108,7 @@ export function projectLearningTranscriptExperience({
     (cue) => cue.startMs <= renderedProgress.capturedAtMs && renderedProgress.capturedAtMs < cue.endMs,
   );
   if (!capturedWithinCurrent) {
-    return baseExperience(track.cues, currentSourceCueIds, playbackMs, {
+    return baseExperience(track.cues, currentSourceCueIds, {
       reason: 'stale-progress',
       currentText,
       renderedText,
@@ -142,7 +116,7 @@ export function projectLearningTranscriptExperience({
   }
 
   if (!canAlignRenderedProgress(currentSourceCues, renderedCues)) {
-    return baseExperience(track.cues, currentSourceCueIds, playbackMs, {
+    return baseExperience(track.cues, currentSourceCueIds, {
       reason: 'text-mismatch',
       currentText,
       renderedText,
@@ -166,14 +140,12 @@ export function projectLearningTranscriptExperience({
     if (index === firstCurrentIndex) projectedTranscript.push(currentCue);
     if (!currentSourceIdSet.has(cue.id)) projectedTranscript.push(cue);
   }
-  const visibleCues = currentNeighborhood(projectedTranscript, [currentCueId], playbackMs);
   const sourceCueIndexByProjectedId = Object.fromEntries(
     projectedTranscript.map((cue) => [cue.id, sourceIndices[cue.id] ?? firstCurrentIndex]),
   );
   return {
     fullTranscript: track.cues,
     continuousViewingProjection: projectedTranscript,
-    visibleCues,
     currentSourceCueIds,
     currentCueIds: [currentCueId],
     sourceCueIndexByProjectedId,

@@ -21,7 +21,7 @@ describe('Learning Transcript Experience', () => {
     });
 
     expect(experience.currentCueIds).toEqual(['cue-2']);
-    expect(experience.visibleCues.find((cue) => cue.id === 'cue-2')?.text).toBe('Current sentence.');
+    expect(experience.continuousViewingProjection.find((cue) => cue.id === 'cue-2')?.text).toBe('Current sentence.');
   });
 
   it('returns every overlap and no current segment during silence', () => {
@@ -57,7 +57,7 @@ describe('Learning Transcript Experience', () => {
 
     expect(experience.currentSourceCueIds).toEqual(['cue-2']);
     expect(experience.currentCueIds).toEqual(['cue-2']);
-    expect(experience.visibleCues.find((cue) => cue.id === 'cue-2')?.text).toBe('Current');
+    expect(experience.continuousViewingProjection.find((cue) => cue.id === 'cue-2')?.text).toBe('Current');
     expect(experience.continuousViewingProjection.map((cue) => cue.text)).toEqual([
       'First sentence.',
       'Current',
@@ -78,7 +78,7 @@ describe('Learning Transcript Experience', () => {
 
     expect(experience.currentSourceCueIds).toEqual(['cue-2']);
     expect(experience.currentCueIds).toEqual(['cue-2']);
-    expect(experience.visibleCues.find((cue) => cue.id === 'cue-2')?.text).toBe('Current sentence.');
+    expect(experience.continuousViewingProjection.find((cue) => cue.id === 'cue-2')?.text).toBe('Current sentence.');
   });
 
   it('finds the correct current cue at 180 Caption Track midpoints', () => {
@@ -135,10 +135,10 @@ describe('Learning Transcript Experience', () => {
 
       expect(refined.currentSourceCueIds).toEqual([cueId]);
       expect(refined.currentCueIds).toEqual([cueId]);
-      expect(refined.visibleCues[0]).toEqual(expect.objectContaining({ id: cueId, text: progressText }));
+      expect(refined.continuousViewingProjection[0]).toEqual(expect.objectContaining({ id: cueId, text: progressText }));
       expect(interrupted.currentSourceCueIds).toEqual([cueId]);
       expect(interrupted.currentCueIds).toEqual([cueId]);
-      expect(interrupted.visibleCues[0]).toEqual(expect.objectContaining({ id: cueId, text: `${progressText} complete.` }));
+      expect(interrupted.continuousViewingProjection[0]).toEqual(expect.objectContaining({ id: cueId, text: `${progressText} complete.` }));
     }
   });
 
@@ -157,7 +157,7 @@ describe('Learning Transcript Experience', () => {
       },
     });
 
-    expect(experience.visibleCues[0].text).toBe('The cat.');
+    expect(experience.continuousViewingProjection[0].text).toBe('The cat.');
   });
 
   it('keeps the full transcript immutable while projecting differently segmented rendered progress', () => {
@@ -179,7 +179,7 @@ describe('Learning Transcript Experience', () => {
     });
 
     expect(experience.fullTranscript).toEqual(track.cues);
-    expect(experience.visibleCues.map((cue) => cue.text)).toEqual(['I think we should']);
+    expect(experience.continuousViewingProjection.map((cue) => cue.text)).toEqual(['I think we should']);
     expect(experience.currentSourceCueIds).toEqual(['source-1', 'source-2']);
     expect(experience.currentCueIds).toEqual(['current:source-1|source-2']);
     expect(experience.sourceCueIndexByProjectedId).toEqual({ 'current:source-1|source-2': 0 });
@@ -230,46 +230,8 @@ describe('Learning Transcript Experience', () => {
     });
 
     expect(experience.currentCueIds).toEqual(['later-repeat']);
-    expect(experience.visibleCues).toEqual(track.cues);
+    expect(experience.continuousViewingProjection).toEqual(track.cues);
     expect(experience.alignmentFailure?.reason).toBe('stale-progress');
-  });
-
-  it('projects one previous, every current, and one next cue for Continuous Viewing', () => {
-    const cues = Array.from({ length: 7 }, (_, index) => ({
-      id: `neighborhood-${index}`,
-      startMs: index * 1_000,
-      endMs: (index + 1) * 1_000,
-      text: `Neighborhood ${index + 1}.`,
-    }));
-    const experience = projectLearningTranscriptExperience({
-      track: { ...completeTrack, cues },
-      playbackMs: 3_500,
-      renderedProgress: null,
-    });
-
-    expect(experience.visibleCues.map((cue) => cue.id)).toEqual([
-      'neighborhood-2',
-      'neighborhood-3',
-      'neighborhood-4',
-    ]);
-    expect(experience.fullTranscript).toEqual(cues);
-  });
-
-  it('keeps the neighborhood around a mid-video silence', () => {
-    const cues = Array.from({ length: 5 }, (_, index) => ({
-      id: `gap-${index}`,
-      startMs: index * 2_000,
-      endMs: index * 2_000 + 1_000,
-      text: `Gap cue ${index + 1}.`,
-    }));
-    const experience = projectLearningTranscriptExperience({
-      track: { ...completeTrack, cues },
-      playbackMs: 3_500,
-      renderedProgress: null,
-    });
-
-    expect(experience.currentCueIds).toEqual([]);
-    expect(experience.visibleCues.map((cue) => cue.id)).toEqual(['gap-1', 'gap-2', 'gap-3']);
   });
 
 });
