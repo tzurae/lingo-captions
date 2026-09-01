@@ -2,6 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import type { ActiveCaptionGroup, CaptionCue, CaptionDiagnostic, CaptionTrack, ContentMessage, PublicSettings, QueryIntentId, QueryRequest, QueryResult as QueryResultValue, RenderedCaptionProgress } from '../domain/types';
 import { buildQueryContext } from '../domain/context-builder';
 import { projectLearningTranscriptExperience } from '../domain/learning-transcript-experience';
+import {
+  initialLearningTranscriptSession,
+  projectSessionTranscript,
+  projectContinuousSessionTranscript,
+  transitionLearningTranscriptSession,
+  type LearningTranscriptEvent,
+  type PlaybackIntent,
+  type ReplayRange,
+  type StudyContext,
+  type StudySentence,
+} from '../domain/learning-transcript-session';
+import { projectContinuousViewingStudyRows, projectStudySentences } from '../domain/study-sentences';
 import { defaultSettings } from '../storage/settings-store';
 import * as messageClient from './message-client';
 import { HistoryView } from './components/HistoryView';
@@ -68,15 +80,100 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const [settings, setSettings] = useState<PublicSettings>(publicDefaultSettings);
   const [activeQueryConfig, setActiveQueryConfig] = useState<ActiveQueryConfig | null>(null);
   const [settingsLoadState, setSettingsLoadState] = useState<SettingsLoadState>('loading');
+  const [transcriptSession, setTranscriptSession] = useState(initialLearningTranscriptSession);
+  const [focusRequest, setFocusRequest] = useState<{ cueId: string; version: number }>();
   const transcriptExperience = useMemo(() => projectLearningTranscriptExperience({
     track: captionTrack,
     playbackMs,
     renderedProgress,
   }), [captionTrack, playbackMs, renderedProgress]);
-  const orderedCues = useMemo(
+  const orderedSourceCues = useMemo(
     () => [...transcriptExperience.fullTranscript].sort((left, right) => left.startMs - right.startMs),
     [transcriptExperience.fullTranscript],
   );
+  const studySentences = useMemo(
+    () => projectStudySentences(orderedSourceCues),
+    [orderedSourceCues],
+  );
+  const continuousViewingStudyRows = useMemo(
+    () => projectContinuousViewingStudyRows({
+      projectedCues: transcriptExperience.continuousViewingProjection,
+      sourceCues: orderedSourceCues,
+      sourceCueIndexByProjectedId: transcriptExperience.sourceCueIndexByProjectedId,
+      studySentences,
+    }),
+    [
+      orderedSourceCues,
+      studySentences,
+      transcriptExperience.continuousViewingProjection,
+      transcriptExperience.sourceCueIndexByProjectedId,
+    ],
+  );
+  const hasPinnedStudyContext = transcriptSession.mode === 'focused-study'
+    && transcriptSession.studyContext !== null;
+  const transcriptStudySentences = useMemo(
+    () => projectSessionTranscript(transcriptSession, studySentences),
+    [studySentences, transcriptSession],
+  );
+  const displayedCues = useMemo(
+    () => hasPinnedStudyContext
+      ? transcriptStudySentences
+      : projectContinuousSessionTranscript(transcriptSession, continuousViewingStudyRows.rows),
+    [
+      continuousViewingStudyRows.rows,
+      hasPinnedStudyContext,
+      transcriptSession,
+      transcriptStudySentences,
+    ],
+  );
+  const transcriptStudySentenceIndexByProjectedId = useMemo(() => {
+    const sourceIndexByStudySentenceId = new Map(
+      transcriptStudySentences.map((sentence, index) => [sentence.id, index]),
+    );
+    return Object.fromEntries(displayedCues.flatMap((row) => {
+      const directIndex = sourceIndexByStudySentenceId.get(row.id);
+      if (directIndex !== undefined) return [[row.id, directIndex]];
+      const liveStudySentenceIndex = continuousViewingStudyRows
+        .studySentenceIndexByProjectedId[row.id];
+      const liveStudySentenceId = liveStudySentenceIndex === undefined
+        ? undefined
+        : studySentences[liveStudySentenceIndex]?.id;
+      const sourceIndex = liveStudySentenceId === undefined
+        ? undefined
+        : sourceIndexByStudySentenceId.get(liveStudySentenceId);
+      return sourceIndex === undefined ? [] : [[row.id, sourceIndex]];
+    }));
+  }, [
+    continuousViewingStudyRows.studySentenceIndexByProjectedId,
+    displayedCues,
+    studySentences,
+    transcriptStudySentences,
+  ]);
+  const currentFocusedStudySentenceIds = useMemo(() => {
+    const currentSourceIds = new Set(transcriptExperience.currentSourceCueIds);
+    return transcriptStudySentences
+      .filter((sentence) => sentence.sourceCueIds.some((id) => currentSourceIds.has(id)))
+      .map((sentence) => sentence.id);
+  }, [transcriptStudySentences, transcriptExperience.currentSourceCueIds]);
+  const liveCurrentDisplayedCueIds = transcriptExperience.currentCueIds.flatMap(
+    (id) => continuousViewingStudyRows.rowIdsByProjectedId[id] ?? [id],
+  );
+  const playbackAnchorStudySentence = transcriptStudySentences.find(
+    (sentence) => sentence.id === transcriptSession.playbackAnchorStudySentenceId,
+  );
+  const activePlaybackAnchorStudySentenceId = playbackAnchorStudySentence
+    && (playbackMs === null
+      || (playbackAnchorStudySentence.startMs <= playbackMs
+        && playbackMs < playbackAnchorStudySentence.endMs))
+    ? playbackAnchorStudySentence.id
+    : undefined;
+  const currentDisplayedCueIds = hasPinnedStudyContext
+    ? currentFocusedStudySentenceIds.length > 0
+      ? currentFocusedStudySentenceIds
+      : activePlaybackAnchorStudySentenceId ? [activePlaybackAnchorStudySentenceId] : []
+    : liveCurrentDisplayedCueIds.length > 0
+      ? liveCurrentDisplayedCueIds
+      : activePlaybackAnchorStudySentenceId ? [activePlaybackAnchorStudySentenceId] : [];
   const displayedDiagnostics = useMemo<CaptionDiagnostic[]>(() => {
     if (!transcriptExperience.alignmentFailure) return diagnostics;
     return [
@@ -101,6 +198,81 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   const queryRequestTokenRef = useRef(0);
   const invalidatedContextReloadedRef = useRef(false);
   const runtimeMessageListenerRef = useRef<(message: ContentMessage, sender?: chrome.runtime.MessageSender) => void>(() => undefined);
+  const transcriptSessionRef = useRef(initialLearningTranscriptSession);
+  const studyIdentityRef = useRef(0);
+  const focusRequestVersionRef = useRef(0);
+
+  function replayRangeForCue(cue: CaptionCue | StudySentence): ReplayRange {
+    const sourceCueIds = new Set('sourceCueIds' in cue ? cue.sourceCueIds : [cue.id]);
+    const belongsToVisibleGroup = captionSource === 'visible-dom'
+      && activeGroup?.cueIds.some((id) => sourceCueIds.has(id));
+    const startMs = belongsToVisibleGroup ? activeGroup?.startMs ?? cue.startMs : cue.startMs;
+    const activeCueIds = new Set(belongsToVisibleGroup ? activeGroup?.cueIds : []);
+    const endMs = belongsToVisibleGroup
+      ? captionTrack?.cues
+        .filter((candidate) => activeCueIds.has(candidate.id))
+        .reduce((latestEndMs, candidate) => Math.max(latestEndMs, candidate.endMs), cue.endMs)
+        ?? cue.endMs
+      : cue.endMs;
+    return {
+      startMs: Math.max(0, startMs),
+      endMs: Math.max(startMs + 1, endMs),
+    };
+  }
+
+  function sendPlaybackIntent(intent: PlaybackIntent): void {
+    if (!intent) return;
+    const activeTabId = ownerTabId ?? activeTabIdRef.current;
+    const tabs = typeof chrome !== 'undefined' ? chrome.tabs : undefined;
+    if (activeTabId === undefined || !tabs) return;
+    if (intent.type === 'pause') {
+      void tabs.sendMessage(activeTabId, { type: 'PAUSE_PLAYBACK' });
+      return;
+    }
+    if (intent.type === 'resume') {
+      void tabs.sendMessage(activeTabId, { type: 'RESUME_PLAYBACK' });
+      return;
+    }
+    void tabs.sendMessage(activeTabId, { type: 'PLAY_FROM_HERE', timeMs: intent.timeMs });
+  }
+
+  function continuousRowIdForStudySentence(studySentenceId: string): string {
+    const studySentenceIndex = studySentences.findIndex((sentence) => sentence.id === studySentenceId);
+    if (studySentenceIndex < 0) return studySentenceId;
+    const currentProjectedId = transcriptExperience.currentCueIds.find(
+      (id) => continuousViewingStudyRows.studySentenceIndexByProjectedId[id] === studySentenceIndex,
+    );
+    if (currentProjectedId) {
+      return continuousViewingStudyRows.rowIdsByProjectedId[currentProjectedId]?.[0]
+        ?? currentProjectedId;
+    }
+    if (continuousViewingStudyRows.rows.some((row) => row.id === studySentenceId)) {
+      return studySentenceId;
+    }
+    const projectedEntry = Object.entries(
+      continuousViewingStudyRows.studySentenceIndexByProjectedId,
+    ).find(([, index]) => index === studySentenceIndex);
+    return projectedEntry?.[0] ?? studySentenceId;
+  }
+
+  function dispatchTranscriptEvent(event: LearningTranscriptEvent): void {
+    const transition = transitionLearningTranscriptSession(transcriptSessionRef.current, event);
+    transcriptSessionRef.current = transition.session;
+    setTranscriptSession(transition.session);
+    sendPlaybackIntent(transition.playbackIntent);
+    if (transition.focusStudySentenceId) {
+      const version = ++focusRequestVersionRef.current;
+      setFocusRequest({
+        cueId: continuousRowIdForStudySentence(transition.focusStudySentenceId),
+        version,
+      });
+    }
+  }
+
+  function resetTranscriptSession(): void {
+    dispatchTranscriptEvent({ type: 'RESET' });
+    setFocusRequest(undefined);
+  }
 
   function clearAssistant(): void {
     queryRequestTokenRef.current += 1;
@@ -116,6 +288,24 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
   }
 
   function selectTranscript(nextSelection: TranscriptSelection): void {
+    const studySentence = transcriptStudySentences[nextSelection.studySentenceIndex];
+    if (!studySentence) return;
+    const queryContext = buildQueryContext({
+      selectedText: nextSelection.selectedText,
+      cueIndex: nextSelection.studySentenceIndex,
+      cues: transcriptStudySentences,
+      contextLines: settings.contextLines,
+    });
+    const studyContext: StudyContext = {
+      id: `study-${++studyIdentityRef.current}`,
+      studySentenceIndex: nextSelection.studySentenceIndex,
+      studySentence: { ...studySentence, sourceCueIds: [...studySentence.sourceCueIds] },
+      selectedText: nextSelection.selectedText,
+      contextBefore: [...queryContext.contextBefore],
+      contextAfter: [...queryContext.contextAfter],
+      replayRange: replayRangeForCue(studySentence),
+    };
+
     queryRequestTokenRef.current += 1;
     setSelection(nextSelection);
     setResult(null);
@@ -126,6 +316,11 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     setQueryError(null);
     setLoading(false);
     setActiveQueryConfig(null);
+    dispatchTranscriptEvent({
+      type: 'SELECT_TEXT',
+      studyContext,
+      studySentences,
+    });
   }
 
   const loadSettings = useCallback(async () => {
@@ -165,6 +360,13 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
       document.removeEventListener('visibilitychange', visibilityListener);
     };
   }, [loadSettings]);
+
+  useEffect(() => {
+    dispatchTranscriptEvent({
+      type: 'LEARNING_TRANSCRIPT_UPDATED',
+      studySentences,
+    });
+  }, [studySentences]);
 
   useEffect(() => {
     const listener = (message: ContentMessage, sender?: chrome.runtime.MessageSender) => {
@@ -224,6 +426,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         setPlaybackMs(null);
         setVideo({ id: message.videoId, title: message.videoTitle, url: message.videoUrl });
         clearAssistant();
+        resetTranscriptSession();
         setDiagnostics([]);
       }
       if (message.type === 'NO_CAPTIONS') {
@@ -231,6 +434,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         setRenderedProgress(null);
         setPlaybackMs(null);
         clearAssistant();
+        resetTranscriptSession();
         setError(message.reason === 'not-english'
           ? 'YouTube 有字幕，但沒有英文字幕軌。'
           : message.reason === 'unsupported'
@@ -262,6 +466,7 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         setPlaybackMs(null);
         setVideo(null);
         clearAssistant();
+        resetTranscriptSession();
         setDiagnostics([]);
         setError(null);
         setRefreshing(false);
@@ -339,48 +544,39 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     }
   }
 
-  function handlePlaybackAction(action: TranscriptPlaybackAction, cue: CaptionCue): void {
+  function handlePlaybackAction(action: TranscriptPlaybackAction, studySentence: StudySentence): void {
     const activeTabId = ownerTabId ?? activeTabIdRef.current;
-    if (activeTabId === undefined || !chrome.tabs) return;
-    const belongsToVisibleGroup = captionSource === 'visible-dom'
-      && activeGroup?.cueIds.includes(cue.id);
-    const startMs = belongsToVisibleGroup ? activeGroup?.startMs ?? cue.startMs : cue.startMs;
+    const tabs = typeof chrome !== 'undefined' ? chrome.tabs : undefined;
+    if (activeTabId === undefined || !tabs) return;
+    const replayRange = replayRangeForCue(studySentence);
     if (action === 'jump') {
-      void chrome.tabs.sendMessage(activeTabId, { type: 'JUMP_TO_HERE', timeMs: Math.max(0, startMs) });
+      void tabs.sendMessage(activeTabId, { type: 'JUMP_TO_HERE', timeMs: replayRange.startMs });
       return;
     }
     if (action === 'play-from-here') {
       clearAssistant();
-      void chrome.tabs.sendMessage(activeTabId, { type: 'PLAY_FROM_HERE', timeMs: Math.max(0, startMs) });
+      dispatchTranscriptEvent({
+        type: 'PLAY_FROM_HERE',
+        studySentenceId: studySentence.id,
+        timeMs: replayRange.startMs,
+      });
       return;
     }
 
-    const activeCueIds = new Set(belongsToVisibleGroup ? activeGroup?.cueIds : []);
-    const activeEndMs = belongsToVisibleGroup
-      ? captionTrack?.cues
-        .filter((candidate) => activeCueIds.has(candidate.id))
-        .reduce((endMs, candidate) => Math.max(endMs, candidate.endMs), cue.endMs) ?? cue.endMs
-      : cue.endMs;
-    void chrome.tabs.sendMessage(activeTabId, {
+    const studyContext = transcriptSessionRef.current.studyContext;
+    const fixedReplayRange = studyContext?.studySentence.id === studySentence.id
+      ? studyContext.replayRange
+      : replayRange;
+    void tabs.sendMessage(activeTabId, {
       type: 'REPLAY_RANGE',
-      startMs: Math.max(0, startMs),
-      endMs: Math.max(startMs + 1, activeEndMs),
+      ...fixedReplayRange,
     });
   }
 
-  const context = useMemo(() => selection ? {
-    ...buildQueryContext({
-      selectedText: selection.selectedText,
-      cueIndex: selection.cueIndex,
-      cues: orderedCues,
-      contextLines: settings.contextLines,
-    }),
-  } : null, [orderedCues, settings.contextLines, selection]);
-
   async function chooseIntent(intent: QueryIntentId, customQuestion?: string) {
-    const querySelection = selection;
-    const queryContext = context;
-    if (!querySelection || !queryContext) return;
+    const studyContext = transcriptSessionRef.current.studyContext;
+    if (!studyContext) return;
+    dispatchTranscriptEvent({ type: 'LEARNING_ACTION', studyId: studyContext.id });
     if (settingsLoadState !== 'ready') {
       setQueryError('設定尚未載入完成，請稍候或到設定頁重新讀取。');
       return;
@@ -392,10 +588,10 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     const requestToken = ++queryRequestTokenRef.current;
     const request: QueryRequest = {
       intent,
-      selectedText: querySelection.selectedText,
-      sentence: queryContext.sentence,
-      contextBefore: queryContext.contextBefore,
-      contextAfter: queryContext.contextAfter,
+      selectedText: studyContext.selectedText,
+      sentence: studyContext.studySentence.text,
+      contextBefore: [...studyContext.contextBefore],
+      contextAfter: [...studyContext.contextAfter],
       outputLanguage: settings.outputLanguage,
       detailLevel: settings.detailLevel,
       customQuestion,
@@ -409,12 +605,14 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     setHistoryWarning(null);
     setActiveQueryConfig({ model: settings.model, reasoningEffort: settings.reasoningEffort });
     try {
-      const selectedCue = orderedCues[querySelection.cueIndex];
-      const queryVideo = selectedCue
-        ? { ...video, subtitlePosition: { startMs: selectedCue.startMs, endMs: selectedCue.endMs } }
-        : video;
+      const queryVideo = {
+        ...video,
+        subtitlePosition: { ...studyContext.replayRange },
+      };
       const response = await messageClient.runQuery(request, queryVideo);
-      if (queryRequestTokenRef.current !== requestToken) return;
+      const isCurrentStudy = queryRequestTokenRef.current === requestToken
+        && transcriptSessionRef.current.studyContext?.id === studyContext.id;
+      if (!isCurrentStudy) return;
       setResult(response.result);
       setCompletedRequest(request);
       if (response.historySaved && response.history) {
@@ -427,11 +625,16 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         setHistoryWarning(response.historyWarning ?? 'Answer completed, but it could not be saved to history.');
       }
     } catch (reason) {
-      if (queryRequestTokenRef.current === requestToken) {
+      const isCurrentStudy = queryRequestTokenRef.current === requestToken
+        && transcriptSessionRef.current.studyContext?.id === studyContext.id;
+      if (isCurrentStudy) {
         setQueryError(reason instanceof Error ? reason.message : 'The OpenAI request failed.');
       }
     } finally {
-      if (queryRequestTokenRef.current === requestToken) setLoading(false);
+      if (queryRequestTokenRef.current === requestToken
+        && transcriptSessionRef.current.studyContext?.id === studyContext.id) {
+        setLoading(false);
+      }
     }
   }
 
@@ -444,6 +647,43 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
     } catch (reason) {
       setQueryError(reason instanceof Error ? reason.message : 'Unable to update favorite.');
     }
+  }
+
+  function currentStudySentenceId(): string | undefined {
+    const currentStudySentenceId = currentFocusedStudySentenceIds[0]
+      ?? activePlaybackAnchorStudySentenceId;
+    if (currentStudySentenceId) return currentStudySentenceId;
+    if (transcriptStudySentences.length === 0) return undefined;
+    if (playbackMs === null) return transcriptStudySentences[0].id;
+    const nextSentenceIndex = transcriptStudySentences.findIndex(
+      (sentence) => sentence.startMs > playbackMs,
+    );
+    return nextSentenceIndex < 0
+      ? transcriptStudySentences.at(-1)?.id
+      : transcriptStudySentences[Math.max(0, nextSentenceIndex - 1)]?.id;
+  }
+
+  function browseEarlierTranscript(): void {
+    dispatchTranscriptEvent({
+      type: 'BROWSE_EARLIER_LEARNING_TRANSCRIPT',
+      studySentences,
+    });
+  }
+
+  function returnToCurrent(): void {
+    clearAssistant();
+    dispatchTranscriptEvent({
+      type: 'RETURN_TO_CURRENT',
+      currentStudySentenceId: currentStudySentenceId(),
+    });
+  }
+
+  function resumeViewing(): void {
+    clearAssistant();
+    dispatchTranscriptEvent({
+      type: 'RESUME',
+      currentStudySentenceId: currentStudySentenceId(),
+    });
   }
 
   const style = { '--font-size': `${settings.fontSize}px`, '--text-color': settings.textColor, '--active-cue-color': settings.activeCueColor } as CSSProperties;
@@ -462,16 +702,30 @@ export function App({ reloadPage = defaultReloadPage }: AppProps = {}) {
         {refreshing && <p role="status">正在重新抓取字幕…</p>}
       </div>
       <CaptionDiagnostics entries={displayedDiagnostics} />
+      {transcriptSession.mode === 'focused-study' && <section
+        className="focused-study-controls"
+        aria-label="Focused Study controls"
+      >
+        <strong>Focused Study</strong>
+        {transcriptSession.newStudySentenceCount > 0 && <span>
+          {transcriptSession.newStudySentenceCount} new {transcriptSession.newStudySentenceCount === 1 ? 'Study Sentence' : 'Study Sentences'}
+        </span>}
+        <button type="button" onClick={returnToCurrent}>Return to Current</button>
+        <button type="button" onClick={resumeViewing}>Resume</button>
+      </section>}
       <TranscriptPanel
-        cues={settings.autoFollowPlayback ? transcriptExperience.visibleCues : orderedCues}
-        sourceCues={orderedCues}
-        sourceCueIndexByVisibleId={transcriptExperience.sourceCueIndexByVisibleId}
-        currentCueIds={transcriptExperience.currentCueIds}
-        autoFollowPlayback={settings.autoFollowPlayback}
+        cues={displayedCues}
+        studySentences={transcriptStudySentences}
+        studySentenceIndexByProjectedId={transcriptStudySentenceIndexByProjectedId}
+        currentCueIds={currentDisplayedCueIds}
+        autoFollowPlayback={transcriptSession.mode === 'continuous-viewing' && settings.autoFollowPlayback}
+        studySentenceId={transcriptSession.studyContext?.studySentence.id}
+        focusRequest={focusRequest}
         fontSize={settings.fontSize}
         textColor={settings.textColor}
         onSelection={selectTranscript}
         onPlaybackAction={handlePlaybackAction}
+        onBrowseEarlierTranscript={browseEarlierTranscript}
       />
       {selection && <SelectionAssistant
         selectedText={completedRequest?.selectedText ?? selection.selectedText}

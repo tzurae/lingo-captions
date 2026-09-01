@@ -327,7 +327,9 @@ function broadcastState(message: SynchronizableMessage): void {
 function isSidePanelContentMessage(message: unknown): message is SidePanelContentMessage {
   if (typeof message !== 'object' || message === null) return false;
   const candidate = message as { type?: unknown; timeMs?: unknown; startMs?: unknown; endMs?: unknown };
-  if (candidate.type === 'REQUEST_STATE') return true;
+  if (candidate.type === 'REQUEST_STATE'
+    || candidate.type === 'PAUSE_PLAYBACK'
+    || candidate.type === 'RESUME_PLAYBACK') return true;
   if ((candidate.type === 'JUMP_TO_HERE' || candidate.type === 'PLAY_FROM_HERE')
     && typeof candidate.timeMs === 'number'
     && Number.isFinite(candidate.timeMs)) {
@@ -349,6 +351,22 @@ function jumpToHere(timeMs: number): void {
   if (!video) return;
   replayEndMs = null;
   video.currentTime = Math.max(0, timeMs) / 1000;
+  sendCurrentPlayback();
+}
+
+function pausePlayback(): void {
+  const video = playbackVideo();
+  if (!video) return;
+  replayEndMs = null;
+  video.pause();
+  sendCurrentPlayback();
+}
+
+function resumePlayback(): void {
+  const video = playbackVideo();
+  if (!video) return;
+  replayEndMs = null;
+  void video.play().catch(() => undefined);
   sendCurrentPlayback();
 }
 
@@ -611,6 +629,14 @@ window.addEventListener('message', (event: MessageEvent<unknown>) => {
 if (typeof chrome !== 'undefined') {
   chrome.runtime.onMessage.addListener((message: unknown) => {
     if (!isSidePanelContentMessage(message)) {
+      return;
+    }
+    if (message.type === 'PAUSE_PLAYBACK') {
+      pausePlayback();
+      return;
+    }
+    if (message.type === 'RESUME_PLAYBACK') {
+      resumePlayback();
       return;
     }
     if (message.type === 'JUMP_TO_HERE') {

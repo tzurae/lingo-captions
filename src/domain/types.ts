@@ -53,6 +53,8 @@ export type ContentMessage =
 
 export type SidePanelContentMessage =
   | { type: 'REQUEST_STATE' }
+  | { type: 'PAUSE_PLAYBACK' }
+  | { type: 'RESUME_PLAYBACK' }
   | { type: 'JUMP_TO_HERE'; timeMs: number }
   | { type: 'PLAY_FROM_HERE'; timeMs: number }
   | { type: 'REPLAY_RANGE'; startMs: number; endMs: number };

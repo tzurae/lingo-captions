@@ -10,11 +10,11 @@ button, input, select { font: inherit; }
 .transcript-view { display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
 .transcript-list { display: grid; gap: 10px; }
 .transcript-view > .transcript-list { flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
-.transcript-focus-window { grid-template-rows: minmax(0, 1fr) auto minmax(0, 1fr); }
-.focus-region { display: grid; gap: 10px; }
-.focus-past { grid-row-start: 1; align-self: end; }
-.focus-current { grid-row-start: 2; }
-.focus-future { grid-row-start: 3; align-self: start; }
+.focused-study-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #c4b5fd; border-radius: 8px; background: #f5f3ff; }
+.focused-study-controls strong { margin-right: auto; color: #5b21b6; }
+.focused-study-controls span { padding: 2px 7px; border-radius: 999px; background: #ede9fe; color: #5b21b6; font-size: 12px; }
+.focused-study-controls button { padding: 4px 8px; border: 1px solid #a78bfa; border-radius: 6px; background: white; color: #4c1d95; font-size: 13px; }
+.focused-study-controls button:hover, .focused-study-controls button:focus { background: #ede9fe; }
 .caption-row { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 8px; align-items: start; }
 .caption-timestamp { grid-column: 1; margin-top: 8px; padding: 3px 5px; border: 0; border-radius: 4px; background: transparent; color: #475569; font-size: 12px; }
 .caption-timestamp:hover, .caption-timestamp:focus { background: #e2e8f0; color: #0f172a; }
@@ -30,6 +30,7 @@ button, input, select { font: inherit; }
 .caption-cue:hover, .caption-cue:focus { background: #f3f4f6; }
 .transcript-focus-window .caption-cue:hover, .transcript-focus-window .caption-cue:focus { opacity: 1; }
 .caption-cue[aria-current='true'] { background: var(--active-cue-color); border-width: 2px; }
+.caption-cue[data-study-sentence='true'] { outline: 3px solid #7c3aed; outline-offset: 2px; background: #f5f3ff; }
 .selection-assistant { z-index: 1000; display: grid; gap: 8px; width: min(390px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; overscroll-behavior: contain; filter: drop-shadow(0 12px 24px rgb(15 23 42 / 22%)); }
 .selection-menu { position: relative; display: grid; gap: 8px; width: 100%; padding: 8px 34px 8px 8px; border: 1px solid #d1d5db; border-radius: 10px; background: white; }
 .selection-menu .action-list { gap: 6px; }
