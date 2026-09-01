@@ -1,5 +1,5 @@
 import type { ActiveCaptionGroup, CaptionCue } from '../domain/types';
-import { splitCaptionText, type CaptionSentence } from './caption-sentences';
+import { splitCaptionText, type CaptionSentence } from '../domain/caption-sentences';
 import { readRenderedCaptionText } from './rendered-caption-text';
 
 export type VisibleCaptionSnapshot = {

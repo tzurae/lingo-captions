@@ -59,6 +59,11 @@ describe('Learning Transcript Experience', () => {
     expect(experience.currentSourceCueIds).toEqual(['cue-2']);
     expect(experience.currentCueIds).toEqual(['cue-2']);
     expect(experience.visibleCues.find((cue) => cue.id === 'cue-2')?.text).toBe('Current');
+    expect(experience.continuousViewingProjection.map((cue) => cue.text)).toEqual([
+      'First sentence.',
+      'Current',
+      'Future sentence.',
+    ]);
   });
 
   it('keeps the complete Current Reading Segment when rendered progress cannot align', () => {
@@ -178,7 +183,36 @@ describe('Learning Transcript Experience', () => {
     expect(experience.visibleCues.map((cue) => cue.text)).toEqual(['I think we should']);
     expect(experience.currentSourceCueIds).toEqual(['source-1', 'source-2']);
     expect(experience.currentCueIds).toEqual(['current:source-1|source-2']);
-    expect(experience.sourceCueIndexByVisibleId).toEqual({ 'current:source-1|source-2': 0 });
+    expect(experience.sourceCueIndexByProjectedId).toEqual({ 'current:source-1|source-2': 0 });
+  });
+
+  it('maps every full Continuous Viewing row back to its Source Cue', () => {
+    const track: CaptionTrack = {
+      ...completeTrack,
+      cues: [
+        { id: 'source-1', startMs: 0, endMs: 2_000, text: 'I think' },
+        { id: 'source-2', startMs: 0, endMs: 2_000, text: 'we should start' },
+        { id: 'source-3', startMs: 2_000, endMs: 3_000, text: 'Third.' },
+        { id: 'source-4', startMs: 3_000, endMs: 4_000, text: 'Fourth.' },
+        { id: 'source-5', startMs: 4_000, endMs: 5_000, text: 'Fifth.' },
+      ],
+    };
+    const experience = projectLearningTranscriptExperience({
+      track,
+      playbackMs: 1_000,
+      renderedProgress: {
+        capturedAtMs: 1_000,
+        cues: [{ id: 'rendered-combined', startMs: 900, endMs: 1_500, text: 'I think we should' }],
+        activeGroup: { cueIds: ['rendered-combined'], startMs: 900 },
+      },
+    });
+
+    expect(experience.sourceCueIndexByProjectedId).toEqual({
+      'current:source-1|source-2': 0,
+      'source-3': 2,
+      'source-4': 3,
+      'source-5': 4,
+    });
   });
 
   it('rejects repeated rendered text captured outside the current Source Cue interval', () => {

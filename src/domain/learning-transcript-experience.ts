@@ -8,10 +8,11 @@ export type ProgressAlignmentFailure = {
 
 export type LearningTranscriptExperience = {
   fullTranscript: CaptionCue[];
+  continuousViewingProjection: CaptionCue[];
   visibleCues: CaptionCue[];
   currentSourceCueIds: string[];
   currentCueIds: string[];
-  sourceCueIndexByVisibleId: Record<string, number>;
+  sourceCueIndexByProjectedId: Record<string, number>;
   alignmentFailure?: ProgressAlignmentFailure;
 };
 
@@ -73,12 +74,11 @@ function baseExperience(
   const sourceIndices = sourceCueIndices(cues);
   return {
     fullTranscript: cues,
+    continuousViewingProjection: cues,
     visibleCues,
     currentSourceCueIds: currentCueIds,
     currentCueIds,
-    sourceCueIndexByVisibleId: Object.fromEntries(
-      visibleCues.map((cue) => [cue.id, sourceIndices[cue.id]]),
-    ),
+    sourceCueIndexByProjectedId: sourceIndices,
     ...(alignmentFailure ? { alignmentFailure } : {}),
   };
 }
@@ -127,17 +127,18 @@ function projectVisibleDomExperience(
   const currentCueIds = renderedCues.map((cue) => cue.id);
   const visibleCues = currentNeighborhood(projectedTranscript, currentCueIds, playbackMs);
   const sourceIndices = sourceCueIndices(track.cues);
-  const sourceCueIndexByVisibleId: Record<string, number> = {};
-  for (const cue of visibleCues) {
+  const sourceCueIndexByProjectedId: Record<string, number> = {};
+  for (const cue of projectedTranscript) {
     const sourceIndex = sourceIndices[cue.id];
-    sourceCueIndexByVisibleId[cue.id] = sourceIndex ?? Math.max(0, insertionIndex);
+    sourceCueIndexByProjectedId[cue.id] = sourceIndex ?? Math.max(0, insertionIndex);
   }
   return {
     fullTranscript: track.cues,
+    continuousViewingProjection: projectedTranscript,
     visibleCues,
     currentSourceCueIds,
     currentCueIds,
-    sourceCueIndexByVisibleId,
+    sourceCueIndexByProjectedId,
   };
 }
 
@@ -216,14 +217,15 @@ export function projectLearningTranscriptExperience({
     if (!currentSourceIdSet.has(cue.id)) projectedTranscript.push(cue);
   }
   const visibleCues = currentNeighborhood(projectedTranscript, [currentCueId], playbackMs);
-  const sourceCueIndexByVisibleId = Object.fromEntries(
-    visibleCues.map((cue) => [cue.id, sourceIndices[cue.id] ?? firstCurrentIndex]),
+  const sourceCueIndexByProjectedId = Object.fromEntries(
+    projectedTranscript.map((cue) => [cue.id, sourceIndices[cue.id] ?? firstCurrentIndex]),
   );
   return {
     fullTranscript: track.cues,
+    continuousViewingProjection: projectedTranscript,
     visibleCues,
     currentSourceCueIds,
     currentCueIds: [currentCueId],
-    sourceCueIndexByVisibleId,
+    sourceCueIndexByProjectedId,
   };
 }

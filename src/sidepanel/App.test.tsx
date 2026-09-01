@@ -14,22 +14,49 @@ vi.mock('./message-client', () => ({
 }));
 
 vi.mock('./components/TranscriptPanel', () => ({
-  TranscriptPanel: ({ cues, onSelection, onPlaybackAction, currentCueIds = [], autoFollowPlayback }: {
+  TranscriptPanel: ({
+    cues,
+    studySentences = cues,
+    studySentenceIndexByProjectedId = {},
+    onSelection,
+    onPlaybackAction,
+    onBrowseEarlierTranscript,
+    currentCueIds = [],
+    autoFollowPlayback,
+    studySentenceId,
+    focusRequest,
+  }: {
     cues: CaptionCue[];
-    onSelection: (selection: { selectedText: string; cueIndex: number; sentence: string; anchor: { x: number; y: number } }) => void;
+    studySentences?: CaptionCue[];
+    studySentenceIndexByProjectedId?: Record<string, number>;
+    onSelection: (selection: { selectedText: string; studySentenceIndex: number; sentence: string; anchor: { x: number; y: number } }) => void;
     onPlaybackAction: (action: 'jump' | 'replay' | 'play-from-here', cue: CaptionCue) => void;
+    onBrowseEarlierTranscript?: () => void;
     currentCueIds: string[];
     autoFollowPlayback: boolean;
+    studySentenceId?: string;
+    focusRequest?: { cueId: string; version: number };
   }) => <>
     <div data-testid="transcript-cues">{cues.map((cue) => cue.text).join(' ')}</div>
-    <button type="button" onClick={() => onSelection({ selectedText: 'selected phrase', cueIndex: 0, sentence: 'A selected phrase.', anchor: { x: 10, y: 20 } })}>Select transcript text</button>
-    <button type="button" onClick={() => onSelection({ selectedText: 'middle phrase', cueIndex: 1, sentence: 'Stale sentence.', anchor: { x: 10, y: 20 } })}>Select middle transcript text</button>
+    <button type="button" onClick={() => onSelection({ selectedText: 'selected phrase', studySentenceIndex: 0, sentence: 'A selected phrase.', anchor: { x: 10, y: 20 } })}>Select transcript text</button>
+    <button type="button" onClick={() => onSelection({ selectedText: 'middle phrase', studySentenceIndex: 1, sentence: 'Stale sentence.', anchor: { x: 10, y: 20 } })}>Select middle transcript text</button>
     <button type="button" data-focused-study-action="preserve" onClick={() => cues[0] && onPlaybackAction('replay', cues[0])}>Replay first cue</button>
     <button type="button" data-focused-study-action="preserve" onClick={() => cues[1] && onPlaybackAction('replay', cues[1])}>Replay second cue</button>
     <button type="button" data-focused-study-action="preserve" onClick={() => cues[0] && onPlaybackAction('jump', cues[0])}>Jump first cue</button>
     <button type="button" onClick={() => cues[0] && onPlaybackAction('play-from-here', cues[0])}>Play from first cue</button>
+    <button type="button" onClick={() => cues[0] && onSelection({
+      selectedText: cues[0].text,
+      studySentenceIndex: 0,
+      sentence: cues[0].text,
+      anchor: { x: 10, y: 20 },
+    })}>Study first cue</button>
+    <button type="button" onClick={() => onBrowseEarlierTranscript?.()}>Browse earlier transcript</button>
     <output data-testid="current-cues">{currentCueIds.join(',') || 'none'}</output>
     <output data-testid="auto-follow">{String(autoFollowPlayback)}</output>
+    <output data-testid="study-sentence">{studySentenceId ?? 'none'}</output>
+    <output data-testid="study-sentences">{studySentences.map((sentence) => sentence.id).join(' ')}</output>
+    <output data-testid="study-sentence-map">{JSON.stringify(studySentenceIndexByProjectedId)}</output>
+    <output data-testid="focus-request">{focusRequest ? `${focusRequest.cueId}:${focusRequest.version}` : 'none'}</output>
   </>,
 }));
 
@@ -276,10 +303,570 @@ describe('App history actions', () => {
     await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
     expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'REPLAY_RANGE', startMs: 1_000, endMs: 2_000 });
     expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
+    expect(screen.getByTestId('focus-request')).toHaveTextContent('none');
 
     await user.click(screen.getByRole('button', { name: 'Play from first cue' }));
     expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 1_000 });
     expect(screen.queryByRole('dialog', { name: 'English learning assistant' })).not.toBeInTheDocument();
+  });
+
+  it('enters Focused Study on selection, pauses playback, and shows the full transcript', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const cues = Array.from({ length: 5 }, (_, index) => ({
+      id: `cue-${index + 1}`,
+      startMs: index * 1_000,
+      endMs: (index + 1) * 1_000,
+      text: `Study sentence ${index + 1}.`,
+    }));
+
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
+      'Study sentence 1. Study sentence 2. Study sentence 3. Study sentence 4. Study sentence 5.',
+    );
+    expect(screen.getByTestId('study-sentence')).toHaveTextContent('study:cue-1:0');
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
+  });
+
+  it('keeps the selected Study Sentence and context fixed when a learning action starts', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const initialCues = [
+      { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Original Study Sentence.' },
+      { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Original context after.' },
+      { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Later sentence.' },
+    ];
+
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: initialCues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          { ...initialCues[0], text: 'Mutated Study Sentence.' },
+          { ...initialCues[1], text: 'Mutated context after.' },
+          initialCues[2],
+        ],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    sendMessage.mockClear();
+
+    await user.click(screen.getByRole('button', { name: '翻譯整句' }));
+
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    await waitFor(() => expect(messageClient.runQuery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sentence: 'Original Study Sentence.',
+        contextAfter: ['Original context after.'],
+      }),
+      expect.objectContaining({
+        subtitlePosition: { startMs: 0, endMs: 1_000 },
+      }),
+    ));
+    expect(screen.getByTestId('study-sentence')).toHaveTextContent('study:cue-1:0');
+  });
+
+  it('keeps appended frozen Study Sentence actions bound to that snapshot', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Frozen Study Sentence.' },
+          { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Live second sentence.' },
+        ],
+      },
+    }));
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [{ id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Live second sentence.' }],
+      },
+    }));
+
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
+      'Frozen Study Sentence. Live second sentence.',
+    );
+    expect(screen.getByTestId('study-sentences')).toHaveTextContent(
+      'study:cue-1:0 study:cue-2:0',
+    );
+    expect(screen.getByTestId('study-sentence-map')).toHaveTextContent(
+      '{"study:cue-1:0":0,"study:cue-2:0":1}',
+    );
+  });
+
+  it('returns or resumes from Focused Study with distinct playback intents', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const cues = [
+      { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'First sentence.' },
+      { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Current sentence.' },
+      { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Last sentence.' },
+    ];
+
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await act(async () => onMessage?.({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 1_500,
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    sendMessage.mockClear();
+    await user.click(screen.getByRole('button', { name: 'Return to Current' }));
+
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
+    expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-2:0:/);
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    sendMessage.mockClear();
+    await user.click(screen.getByRole('button', { name: 'Resume' }));
+
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'RESUME_PLAYBACK' });
+    expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
+  });
+
+  it('returns to the playback-derived live neighborhood during a caption gap', async () => {
+    const user = userEvent.setup();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, {
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42 }]), sendMessage },
+    });
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          { id: 'cue-before-gap', startMs: 0, endMs: 1_000, text: 'Before gap.' },
+          { id: 'cue-after-gap', startMs: 2_000, endMs: 3_000, text: 'After gap.' },
+        ],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await act(async () => onMessage?.({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 1_500,
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+
+    await user.click(screen.getByRole('button', { name: 'Return to Current' }));
+
+    expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-before-gap:0:/);
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+  });
+
+  it('returns to the stable Study Sentence row while its current text is transient', async () => {
+    const user = userEvent.setup();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, {
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42 }]), sendMessage },
+    });
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          { id: 'source-1', startMs: 0, endMs: 2_000, text: 'I think' },
+          { id: 'source-2', startMs: 0, endMs: 2_000, text: 'we should start.' },
+        ],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await act(async () => onMessage?.({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 1_000,
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await act(async () => onMessage?.({
+      type: 'CAPTION_PROGRESS_UPDATED',
+      videoId: 'video-1',
+      progress: {
+        capturedAtMs: 1_000,
+        cues: [{ id: 'rendered-combined', startMs: 900, endMs: 1_500, text: 'I think we should' }],
+        activeGroup: { cueIds: ['rendered-combined'], startMs: 900 },
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    await user.click(screen.getByRole('button', { name: 'Return to Current' }));
+
+    expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:source-1:0:/);
+  });
+
+  it('does not clear the saved automatic-follow opt-out during mode transitions', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    vi.mocked(messageClient.getSettings).mockResolvedValue({
+      ...publicSettings,
+      autoFollowPlayback: false,
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByTestId('auto-follow')).toHaveTextContent('false'));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Opted out sentence.' }],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    await user.click(screen.getByRole('button', { name: 'Return to Current' }));
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    await user.click(screen.getByRole('button', { name: 'Resume' }));
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
+  });
+
+  it('keeps Study Sentence and Replay Range fixed across twenty playback and progress events', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const cues = [
+      { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Pinned Study Sentence.' },
+      { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Second sentence.' },
+      { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Third sentence.' },
+    ];
+
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    const listener = registeredListeners[0];
+    await act(async () => listener({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+
+    await act(async () => {
+      for (let index = 0; index < 20; index += 1) {
+        if (index % 2 === 0) {
+          listener({
+            type: 'PLAYBACK_UPDATED',
+            videoId: 'video-1',
+            currentTimeMs: 1_000 + index * 25,
+          }, { tab: { id: 42 } } as chrome.runtime.MessageSender);
+        } else {
+          listener({
+            type: 'CAPTION_PROGRESS_UPDATED',
+            videoId: 'video-1',
+            progress: {
+              capturedAtMs: 1_000 + index * 25,
+              cues: [{ id: `progress-${index}`, startMs: 1_000, endMs: 2_000, text: `Progress ${index}` }],
+              activeGroup: { cueIds: [`progress-${index}`], startMs: 1_000 },
+            },
+          }, { tab: { id: 42 } } as chrome.runtime.MessageSender);
+        }
+      }
+    });
+
+    expect(screen.getByTestId('study-sentence')).toHaveTextContent('study:cue-1:0');
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent('Pinned Study Sentence.');
+    sendMessage.mockClear();
+    await user.click(screen.getByRole('button', { name: 'Replay first cue' }));
+    expect(sendMessage).toHaveBeenCalledWith(42, {
+      type: 'REPLAY_RANGE',
+      startMs: 0,
+      endMs: 1_000,
+    });
+  });
+
+  it('keeps history stationary while new segments accumulate behind a persistent return control', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const initialCues = [
+      { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Historical one.' },
+      { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Historical two.' },
+      { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Current three.' },
+    ];
+
+
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: initialCues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    sendMessage.mockClear();
+
+    await user.click(screen.getByRole('button', { name: 'Browse earlier transcript' }));
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Return to Current' })).toBeInTheDocument();
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('false');
+
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          ...initialCues,
+          { id: 'cue-4', startMs: 3_000, endMs: 4_000, text: 'New four.' },
+          { id: 'cue-5', startMs: 4_000, endMs: 5_000, text: 'New five.' },
+        ],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toHaveTextContent('2 new Study Sentences');
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
+      'Historical one. Historical two. Current three. New four. New five.',
+    );
+    expect(screen.getByTestId('focus-request')).toHaveTextContent('none');
+    await user.click(screen.getByRole('button', { name: 'Return to Current' }));
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+  });
+  it('retains non-selected historical rows after shrinking updates and Play from Here', async () => {
+    const user = userEvent.setup();
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, {
+      tabs: { query: vi.fn().mockResolvedValue([{ id: 42 }]), sendMessage },
+    });
+    const initialCues = [
+      { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Retained one.' },
+      { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Retained two.' },
+      { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Current three.' },
+    ];
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues: initialCues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await user.click(screen.getByRole('button', { name: 'Browse earlier transcript' }));
+
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [
+          initialCues[2],
+          { id: 'cue-4', startMs: 3_000, endMs: 4_000, text: 'New four.' },
+        ],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
+      'Retained one. Retained two. Current three. New four.',
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Play from first cue' }));
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
+      'Retained one. Retained two. Current three. New four.',
+    );
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 0 });
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:cue-1:0');
+    expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-1:0:/);
+  });
+
+  it('keeps a failed query attached to the same Focused Study identity', async () => {
+    const user = userEvent.setup();
+    vi.mocked(messageClient.runQuery).mockRejectedValueOnce(new Error('Query failed.'));
+    render(<App />);
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Failure Study Sentence.' }],
+      },
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    await user.click(screen.getByRole('button', { name: '翻譯整句' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Query failed.');
+    expect(screen.getByRole('dialog', { name: 'English learning assistant' })).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
+    expect(screen.getByTestId('study-sentence')).toHaveTextContent('study:cue-1:0');
+  });
+
+  it('plays from a historical row without deleting transcript history and resumes following there', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    const cues = [
+      { id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Play here one.' },
+      { id: 'cue-2', startMs: 1_000, endMs: 2_000, text: 'Keep history two.' },
+      { id: 'cue-3', startMs: 2_000, endMs: 3_000, text: 'Current three.' },
+    ];
+
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: { language: 'en', isEnglish: true, source: 'timedtext', cues },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await act(async () => onMessage?.({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 2_500,
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    sendMessage.mockClear();
+
+    await user.click(screen.getByRole('button', { name: 'Play from first cue' }));
+
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PLAY_FROM_HERE', timeMs: 0 });
+    expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('auto-follow')).toHaveTextContent('true');
+    expect(screen.getByTestId('focus-request')).toHaveTextContent(/^study:cue-1:0:/);
+    expect(screen.getByTestId('transcript-cues')).toHaveTextContent(
+      'Play here one. Keep history two. Current three.',
+    );
+  });
+
+  it('supports a keyboard-only Study, AI, Replay, and Return flow', async () => {
+    const user = userEvent.setup();
+    const query = vi.fn().mockResolvedValue([{ id: 42 }]);
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
+    render(<App />);
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith(42, { type: 'REQUEST_STATE' }));
+    await act(async () => onMessage?.({
+      type: 'CAPTIONS_UPDATED',
+      videoId: 'video-1',
+      videoTitle: 'Video one',
+      videoUrl: 'https://youtube.test/watch?v=video-1',
+      track: {
+        language: 'en',
+        isEnglish: true,
+        source: 'timedtext',
+        cues: [{ id: 'cue-1', startMs: 0, endMs: 1_000, text: 'Keyboard Study Sentence.' }],
+      },
+    }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
+
+    screen.getByRole('button', { name: 'Study first cue' }).focus();
+    await user.keyboard('{Enter}');
+    expect(sendMessage).toHaveBeenLastCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+
+    screen.getByRole('button', { name: '翻譯整句' }).focus();
+    await user.keyboard('{Enter}');
+    expect(await screen.findByText('Answer')).toBeInTheDocument();
+
+    screen.getByRole('button', { name: 'Replay first cue' }).focus();
+    await user.keyboard('{Enter}');
+    expect(sendMessage).toHaveBeenLastCalledWith(42, {
+      type: 'REPLAY_RANGE',
+      startMs: 0,
+      endMs: 1_000,
+    });
+    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
+
+    sendMessage.mockClear();
+    screen.getByRole('button', { name: 'Return to Current' }).focus();
+    await user.keyboard('{Enter}');
+    expect(sendMessage).toHaveBeenCalledWith(42, { type: 'PAUSE_PLAYBACK' });
+    expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
   });
 
   it('keeps every visible-DOM group cue current after playback updates', async () => {
@@ -314,7 +901,7 @@ describe('App history actions', () => {
       currentTimeMs: 20_000,
     }));
 
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('visible-0,visible-1,visible-2');
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-0:0,study:visible-1:0,study:visible-2:0');
   });
 
   it('uses group range for active visible cues and cue range for inactive visible cues', async () => {
@@ -360,6 +947,7 @@ describe('App history actions', () => {
   });
 
   it('sanitizes visible groups and clears them when the selected video changes', async () => {
+    const user = userEvent.setup();
     const query = vi.fn().mockResolvedValue([{ id: 42 }]);
     const sendMessage = vi.fn().mockResolvedValue(undefined);
     Object.assign(globalThis.chrome, { tabs: { query, sendMessage } });
@@ -388,7 +976,7 @@ describe('App history actions', () => {
         },
       },
     }));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('visible-1,visible-2');
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-1:0,study:visible-2:0');
 
     await act(async () => listener({
       type: 'CAPTIONS_UPDATED',
@@ -418,7 +1006,9 @@ describe('App history actions', () => {
         activeGroup: { cueIds: ['visible-0', 'visible-1'], startMs: 10_000 },
       },
     }));
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('visible-0,visible-1');
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-0:0,study:visible-1:0');
+    await user.click(screen.getByRole('button', { name: 'Select transcript text' }));
+    expect(screen.getByRole('region', { name: 'Focused Study controls' })).toBeInTheDocument();
 
     await act(async () => listener({
       type: 'VIDEO_CHANGED',
@@ -427,6 +1017,7 @@ describe('App history actions', () => {
       videoUrl: 'https://youtube.test/watch?v=video-2',
     }, { tab: { id: 42 } } as chrome.runtime.MessageSender));
     expect(screen.getByTestId('current-cues')).toHaveTextContent('none');
+    expect(screen.queryByRole('region', { name: 'Focused Study controls' })).not.toBeInTheDocument();
   });
 
   it('clears a visible group when captions become unavailable', async () => {
@@ -1059,7 +1650,7 @@ describe('App history actions', () => {
       },
     }));
 
-    expect(screen.getByTestId('current-cues')).toHaveTextContent('progress-0');
+    expect(screen.getByTestId('current-cues')).toHaveTextContent('study:visible-delayed:0');
     expect(screen.getByTestId('transcript-cues')).toHaveTextContent('National League guy,.....Almost');
   });
 

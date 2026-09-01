@@ -125,6 +125,32 @@ test('keyboard focus reveals row actions while caption Enter remains inert', asy
   await expect.poll(() => playbackActionCount(page)).toBe(0);
 });
 
+test('keyboard Study Sentence opens a learning selection without playback', async ({ page }) => {
+  const study = page.getByRole('button', { name: 'Study Sentence: I, ...' });
+  await study.focus();
+  await page.keyboard.press('Enter');
+
+  await expect.poll(() => selectedText(page)).toBe('I, ...');
+  await expect.poll(() => playbackActionCount(page)).toBe(0);
+});
+
+test('entering history browsing preserves the learner scroll position', async ({ page }) => {
+  await page.goto(`${fixturePath}?count=120`);
+  await expect(page.locator('.caption-row')).toHaveCount(120);
+  await page.evaluate(() => window.__transcriptPointerRegression.setAutoFollowPlayback(true));
+  await expect(page.locator('.transcript-list')).toHaveClass(/transcript-focus-window/);
+  const before = await page.locator('.transcript-list').evaluate((list) => {
+    list.scrollTop = 1_000;
+    return list.scrollTop;
+  });
+
+  await page.evaluate(() => window.__transcriptPointerRegression.setAutoFollowPlayback(false));
+  await expect(page.locator('.transcript-list')).not.toHaveClass(/transcript-focus-window/);
+  const after = await page.locator('.transcript-list').evaluate((list) => list.scrollTop);
+
+  expect(after).toBe(before);
+});
+
 test('touch contexts keep row actions visible without hover', async ({ browser }) => {
   const context = await browser.newContext({
     hasTouch: true,
@@ -140,4 +166,18 @@ test('touch contexts keep row actions visible without hover', async ({ browser }
   await expect(actions).toHaveCSS('pointer-events', 'auto');
 
   await context.close();
+});
+
+test('a one-hour Learning Transcript stays within the non-virtualized render budget', async ({ page }) => {
+  await page.goto(`${fixturePath}?count=1200`);
+  await expect(page.locator('.caption-row')).toHaveCount(1_200);
+  await expect.poll(() => page.evaluate(
+    () => window.__transcriptPointerRegression.renderDurationMs,
+  )).not.toBeNull();
+  const measuredDurationMs = await page.evaluate(
+    () => window.__transcriptPointerRegression.renderDurationMs!,
+  );
+
+  console.log(`1,200-row Learning Transcript render: ${measuredDurationMs.toFixed(1)}ms`);
+  expect(measuredDurationMs).toBeLessThan(1_500);
 });

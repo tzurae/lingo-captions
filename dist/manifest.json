@@ -33,7 +33,7 @@
     },
     {
       "js": [
-        "assets/content-script.ts-loader-CFRxRK4b.js"
+        "assets/content-script.ts-loader-BApHasit.js"
       ],
       "matches": [
         "https://www.youtube.com/*",
@@ -49,7 +49,8 @@
       ],
       "resources": [
         "assets/page-bridge.ts-BnPZ8G8o.js",
-        "assets/content-script.ts-CFQi46Uy.js"
+        "assets/caption-sentences-DpMqS0RL.js",
+        "assets/content-script.ts-bNo93wj_.js"
       ],
       "use_dynamic_url": false
     }

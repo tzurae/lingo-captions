@@ -21,19 +21,13 @@ describe('selection assistant styles', () => {
     }
   });
 
-  it('centers the focus region and visually separates past, current, and future cues', () => {
+  it('keeps one transcript list while separating past, current, future, and study cues', () => {
     const style = document.createElement('style');
     style.textContent = readFileSync('src/sidepanel/styles.css', 'utf8');
     document.head.append(style);
 
-    const focusWindow = document.createElement('section');
-    focusWindow.className = 'transcript-list transcript-focus-window';
-    const pastRegion = document.createElement('div');
-    pastRegion.className = 'focus-region focus-past';
-    const currentRegion = document.createElement('div');
-    currentRegion.className = 'focus-region focus-current';
-    const futureRegion = document.createElement('div');
-    futureRegion.className = 'focus-region focus-future';
+    const transcript = document.createElement('section');
+    transcript.className = 'transcript-list transcript-focus-window';
     const pastCue = document.createElement('p');
     pastCue.className = 'caption-cue';
     pastCue.dataset.cueState = 'past';
@@ -43,22 +37,20 @@ describe('selection assistant styles', () => {
     const futureCue = document.createElement('p');
     futureCue.className = 'caption-cue';
     futureCue.dataset.cueState = 'future';
-    pastRegion.append(pastCue);
-    currentRegion.append(currentCue);
-    futureRegion.append(futureCue);
-    focusWindow.append(pastRegion, currentRegion, futureRegion);
-    document.body.append(focusWindow);
+    const studyCue = document.createElement('p');
+    studyCue.className = 'caption-cue';
+    studyCue.dataset.studySentence = 'true';
+    transcript.append(pastCue, currentCue, futureCue, studyCue);
+    document.body.append(transcript);
 
     try {
-      expect(getComputedStyle(focusWindow).display).toBe('grid');
-      expect(getComputedStyle(pastRegion).gridRowStart).toBe('1');
-      expect(getComputedStyle(currentRegion).gridRowStart).toBe('2');
-      expect(getComputedStyle(futureRegion).gridRowStart).toBe('3');
+      expect(getComputedStyle(transcript).display).toBe('grid');
       expect(getComputedStyle(pastCue).opacity).toBe('0.4');
       expect(getComputedStyle(currentCue).opacity).toBe('1');
       expect(getComputedStyle(futureCue).opacity).toBe('0.65');
+      expect(getComputedStyle(studyCue).backgroundColor).toBe('rgb(245, 243, 255)');
     } finally {
-      focusWindow.remove();
+      transcript.remove();
       style.remove();
     }
   });

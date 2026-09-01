@@ -1,51 +1,67 @@
 import type { CaptionCue } from '../../domain/types';
+import type { StudySentence } from '../../domain/learning-transcript-session';
 import { useLayoutEffect, useMemo, useRef } from 'react';
 
-export type TranscriptSelection = { selectedText: string; cueIndex: number; sentence: string; anchor: { x: number; y: number } };
+export type TranscriptSelection = { selectedText: string; studySentenceIndex: number; sentence: string; anchor: { x: number; y: number } };
 
 export type TranscriptPlaybackAction = 'jump' | 'replay' | 'play-from-here';
 
 type Props = {
   cues: CaptionCue[];
-  sourceCues?: CaptionCue[];
-  sourceCueIndexByVisibleId?: Record<string, number>;
+  studySentences: StudySentence[];
+  studySentenceIndexByProjectedId: Record<string, number>;
   currentCueIds: string[];
   autoFollowPlayback: boolean;
+  studySentenceId?: string;
+  focusRequest?: { cueId: string; version: number };
   fontSize?: number;
   textColor?: string;
   onSelection: (selection: TranscriptSelection) => void;
-  onPlaybackAction: (action: TranscriptPlaybackAction, cue: CaptionCue) => void;
+  onPlaybackAction: (action: TranscriptPlaybackAction, studySentence: StudySentence) => void;
+  onBrowseEarlierTranscript?: () => void;
 };
 
 type CueEntry = {
   cue: CaptionCue;
-  visibleIndex: number;
-  sourceCueIndex: number;
-  region: 'past' | 'current' | 'future';
+  studySentenceIndex: number;
   state: 'past' | 'current' | 'future';
 };
 
 export function TranscriptPanel({
   cues,
-  sourceCues = cues,
-  sourceCueIndexByVisibleId,
+  studySentences,
+  studySentenceIndexByProjectedId,
   currentCueIds,
   autoFollowPlayback,
   fontSize,
+  studySentenceId,
+  focusRequest,
   textColor,
   onSelection,
   onPlaybackAction,
+  onBrowseEarlierTranscript,
 }: Props) {
   const orderedCues = useMemo(() => [...cues].sort((a, b) => a.startMs - b.startMs), [cues]);
-  const orderedSourceCues = useMemo(
-    () => [...sourceCues].sort((a, b) => a.startMs - b.startMs),
-    [sourceCues],
-  );
+  const studySentenceSources = useMemo(() => [...studySentences], [studySentences]);
   const currentIdSet = new Set(currentCueIds);
   const currentIndices = orderedCues.flatMap((cue, index) => currentIdSet.has(cue.id) ? [index] : []);
   const activeFirst = currentIndices.at(0) ?? -1;
   const activeLast = currentIndices.at(-1) ?? -1;
   const lastFocusedRangeRef = useRef<{ firstId: string; lastId: string } | null>(null);
+  const previousScrollTopRef = useRef(0);
+  const transcriptRef = useRef<HTMLElement | null>(null);
+  const programmaticScrollRef = useRef(false);
+  function centerCue(cueId: string): void {
+    const cue = Array.from(
+      transcriptRef.current?.querySelectorAll<HTMLElement>('[data-cue-id]') ?? [],
+    ).find((element) => element.dataset.cueId === cueId);
+    if (!cue?.scrollIntoView) return;
+    programmaticScrollRef.current = true;
+    cue.scrollIntoView({ block: 'center' });
+    window.requestAnimationFrame(() => {
+      programmaticScrollRef.current = false;
+    });
+  }
   useLayoutEffect(() => {
     if (activeFirst >= 0 && activeLast >= activeFirst) {
       lastFocusedRangeRef.current = {
@@ -61,6 +77,12 @@ export function TranscriptPanel({
       lastFocusedRangeRef.current = null;
     }
   }, [activeFirst, activeLast, orderedCues]);
+  useLayoutEffect(() => {
+    if (autoFollowPlayback && currentCueIds.length > 0) centerCue(currentCueIds[0]);
+  }, [autoFollowPlayback, currentCueIds.join('\u0000')]);
+  useLayoutEffect(() => {
+    if (focusRequest) centerCue(focusRequest.cueId);
+  }, [focusRequest?.cueId, focusRequest?.version]);
   const remembered = lastFocusedRangeRef.current;
   const rememberedFirst = remembered
     ? orderedCues.findIndex((cue) => cue.id === remembered.firstId)
@@ -70,10 +92,7 @@ export function TranscriptPanel({
     : -1;
   const focusFirst = activeFirst >= 0 ? activeFirst : rememberedFirst;
   const focusLast = activeLast >= 0 ? activeLast : rememberedLast;
-  const allEntries: CueEntry[] = orderedCues.map((cue, visibleIndex) => {
-    const region = focusFirst < 0 || visibleIndex > focusLast
-      ? 'future'
-      : visibleIndex < focusFirst ? 'past' : 'current';
+  const visibleEntries: CueEntry[] = orderedCues.map((cue, visibleIndex) => {
     const state = currentIdSet.has(cue.id)
       ? 'current'
       : activeFirst < 0 && visibleIndex >= focusFirst && visibleIndex <= focusLast
@@ -81,13 +100,10 @@ export function TranscriptPanel({
         : focusFirst >= 0 && visibleIndex <= focusLast ? 'past' : 'future';
     return {
       cue,
-      visibleIndex,
-      sourceCueIndex: sourceCueIndexByVisibleId?.[cue.id] ?? visibleIndex,
-      region,
+      studySentenceIndex: studySentenceIndexByProjectedId[cue.id] ?? -1,
       state,
     };
   });
-  const visibleEntries = allEntries;
 
   function formatTimestamp(timeMs: number): string {
     const totalSeconds = Math.max(0, Math.floor(timeMs / 1_000));
@@ -107,7 +123,7 @@ export function TranscriptPanel({
 
   function reportSelection(event: React.KeyboardEvent<HTMLElement> | React.PointerEvent<HTMLElement>): boolean {
     const browserSelection = window.getSelection();
-    const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-cue-index]') : null;
+    const target = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-study-sentence-index]') : null;
     if (!browserSelection || browserSelection.isCollapsed || !target || browserSelection.rangeCount === 0) {
       return false;
     }
@@ -115,39 +131,62 @@ export function TranscriptPanel({
     if (!range.intersectsNode(target)) return false;
     const text = selectedTranscriptText(range);
     if (text === '') return false;
-    const sourceCueIndex = Number(target.dataset.cueIndex);
-    const sourceCue = orderedSourceCues[sourceCueIndex];
-    if (!sourceCue) return false;
+    const studySentenceIndex = Number(target.dataset.studySentenceIndex);
+    const studySentence = studySentenceSources[studySentenceIndex];
+    if (!studySentence) return false;
     const rect = range.getBoundingClientRect();
     onSelection({
       selectedText: text,
-      cueIndex: sourceCueIndex,
-      sentence: sourceCue.text,
+      studySentenceIndex,
+      sentence: studySentence.text,
       anchor: { x: rect.left + rect.width / 2, y: rect.bottom },
     });
     return true;
+  }
+
+  function reportScroll(event: React.UIEvent<HTMLElement>): void {
+    const nextScrollTop = event.currentTarget.scrollTop;
+    const previousScrollTop = previousScrollTopRef.current;
+    previousScrollTopRef.current = nextScrollTop;
+    if (programmaticScrollRef.current) return;
+    if (nextScrollTop < previousScrollTop) onBrowseEarlierTranscript?.();
   }
 
   if (orderedCues.length === 0) {
     return <p role="status">No English captions are available.</p>;
   }
 
-  const renderCue = ({ cue, sourceCueIndex, state }: CueEntry) => {
-    const sourceCue = orderedSourceCues[sourceCueIndex] ?? cue;
-    const timestamp = formatTimestamp(sourceCue.startMs);
+  const renderCue = ({ cue, studySentenceIndex, state }: CueEntry) => {
+    const sourceStudySentence = studySentenceSources[studySentenceIndex];
+    const timestamp = formatTimestamp((sourceStudySentence ?? cue).startMs);
+    const beginStudySentence = (target: HTMLElement) => {
+      if (!sourceStudySentence) return;
+      const caption = target.closest('.caption-row')?.querySelector<HTMLElement>('.caption-cue');
+      const rect = (caption ?? target).getBoundingClientRect();
+      onSelection({
+        selectedText: sourceStudySentence.text,
+        studySentenceIndex,
+        sentence: sourceStudySentence.text,
+        anchor: { x: rect.left + rect.width / 2, y: rect.bottom },
+      });
+    };
     return (
       <div key={cue.id} className="caption-row">
-        <button
-          type="button"
-          className="caption-timestamp"
-          aria-label={`Play from ${timestamp}`}
-          onClick={() => onPlaybackAction('play-from-here', sourceCue)}
-        >
-          {timestamp}
-        </button>
+        {sourceStudySentence
+          ? <button
+            type="button"
+            className="caption-timestamp"
+            aria-label={`Play from ${timestamp}`}
+            onClick={() => onPlaybackAction('play-from-here', sourceStudySentence)}
+          >
+            {timestamp}
+          </button>
+          : <span className="caption-timestamp" aria-hidden="true">{timestamp}</span>}
         <p
-          data-cue-index={sourceCueIndex}
+          data-study-sentence-index={studySentenceIndex >= 0 ? studySentenceIndex : undefined}
           data-cue-state={autoFollowPlayback ? state : undefined}
+          data-study-sentence={cue.id === studySentenceId ? 'true' : undefined}
+          data-cue-id={cue.id}
           aria-current={currentIdSet.has(cue.id) ? 'true' : undefined}
           className="caption-cue"
           tabIndex={0}
@@ -156,11 +195,21 @@ export function TranscriptPanel({
         >
           {cue.text}
         </p>
-        <div className="caption-row-actions" aria-label={`Actions for ${sourceCue.text}`}>
-          <button type="button" data-focused-study-action="preserve" aria-label={`Jump to Here: ${sourceCue.text}`} onClick={() => onPlaybackAction('jump', sourceCue)}>Jump to Here</button>
-          <button type="button" data-focused-study-action="preserve" aria-label={`Replay: ${sourceCue.text}`} onClick={() => onPlaybackAction('replay', sourceCue)}>Replay</button>
-          <button type="button" aria-label={`Play from Here: ${sourceCue.text}`} onClick={() => onPlaybackAction('play-from-here', sourceCue)}>Play from Here</button>
-        </div>
+        {sourceStudySentence && <div
+          className="caption-row-actions"
+          aria-label={`Actions for ${sourceStudySentence.text}`}
+        >
+          <button type="button" data-focused-study-action="preserve" aria-label={`Jump to Here: ${sourceStudySentence.text}`} onClick={() => onPlaybackAction('jump', sourceStudySentence)}>Jump to Here</button>
+          <button type="button" data-focused-study-action="preserve" aria-label={`Replay: ${sourceStudySentence.text}`} onClick={() => onPlaybackAction('replay', sourceStudySentence)}>Replay</button>
+          <button type="button" aria-label={`Play from Here: ${sourceStudySentence.text}`} onClick={() => onPlaybackAction('play-from-here', sourceStudySentence)}>Play from Here</button>
+          <button
+            type="button"
+            aria-label={`Study Sentence: ${sourceStudySentence.text}`}
+            onClick={(event) => beginStudySentence(event.currentTarget)}
+          >
+            Study Sentence
+          </button>
+        </div>}
       </div>
     );
   };
@@ -170,31 +219,14 @@ export function TranscriptPanel({
     ...(textColor === undefined ? {} : { color: textColor }),
   };
 
-  if (autoFollowPlayback) {
-    const pastEntries = visibleEntries.filter((entry) => entry.region === 'past');
-    const currentEntries = visibleEntries.filter((entry) => entry.region === 'current');
-    const futureEntries = visibleEntries.filter((entry) => entry.region === 'future');
-
-    return (
-      <section
-        aria-label="Transcript"
-        className="transcript-list transcript-focus-window"
-        style={transcriptStyle}
-        onKeyUp={reportSelection}
-      >
-        <div className="focus-region focus-past">{pastEntries.map(renderCue)}</div>
-        <div className="focus-region focus-current">{currentEntries.map(renderCue)}</div>
-        <div className="focus-region focus-future">{futureEntries.map(renderCue)}</div>
-      </section>
-    );
-  }
-
   return (
     <section
       aria-label="Transcript"
-      className="transcript-list"
+      ref={transcriptRef}
+      className={`transcript-list${autoFollowPlayback ? ' transcript-focus-window' : ''}`}
       style={transcriptStyle}
       onKeyUp={reportSelection}
+      onScroll={reportScroll}
     >
       {visibleEntries.map(renderCue)}
     </section>

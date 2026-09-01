@@ -680,6 +680,33 @@ describe('content-script late-open state synchronization', () => {
     expect(sendMessage).toHaveBeenCalledWith({ type: 'PLAYBACK_UPDATED', videoId: 'video-1', currentTimeMs: 500 });
   });
 
+  it('pauses and resumes Focused Study without seeking', async () => {
+    setVideoUrl();
+    setPlayerResponseScript(playerResponse);
+    const video = document.createElement('video');
+    const play = vi.fn().mockResolvedValue(undefined);
+    const pause = vi.fn();
+    Object.defineProperty(video, 'currentTime', { configurable: true, writable: true, value: 12 });
+    Object.defineProperty(video, 'play', { configurable: true, value: play });
+    Object.defineProperty(video, 'pause', { configurable: true, value: pause });
+    document.body.append(video);
+    const { onMessage, sendMessage } = await loadContentScriptRuntime({ captionResponse: playerResponse });
+    sendMessage.mockClear();
+
+    onMessage?.({ type: 'PAUSE_PLAYBACK' });
+    expect(video.currentTime).toBe(12);
+    expect(pause).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith({
+      type: 'PLAYBACK_UPDATED',
+      videoId: 'video-1',
+      currentTimeMs: 12_000,
+    });
+
+    onMessage?.({ type: 'RESUME_PLAYBACK' });
+    expect(video.currentTime).toBe(12);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it('plays continuously from an explicit historical time', async () => {
     setVideoUrl();
     setPlayerResponseScript(playerResponse);
